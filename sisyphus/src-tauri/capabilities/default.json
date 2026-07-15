@@ -6,6 +6,8 @@
   "permissions": [
     "core:default",
     "opener:default",
-    "notification:default"
+    "opener:allow-reveal-item-in-dir",
+    "notification:default",
+    "os:default"
   ]
 }

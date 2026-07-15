@@ -11,6 +11,11 @@ pub mod rule_engine;
 pub mod ingest;
 pub mod context;
 pub mod category;
+pub mod artifacts;
+pub mod vault;
+pub mod knowledge;
+pub mod intervention;
+pub mod timeline;
 
 pub use ingest::{ingest_event, capture_text, NewEvent};
 pub use rule_engine::{DailyGoal, Finding, RuleContext, RuleEngine};

@@ -1,47 +1,72 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Check, X, Plus, Bell, Clock, CircleCheck, Circle, Ban } from "lucide-react";
+import { Card, CardLabel } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { cn } from "@/lib/utils";
+import { fmtClock } from "@/lib/format";
 
-interface DailyGoal {
+interface DailyGoal { id: string; date: string; raw_text: string; status: string }
+interface Task {
   id: string;
-  date: string;
-  raw_text: string;
+  title: string;
   status: string;
+  due_ms: number | null;
+  priority: number;
+  note: string | null;
+  created_at: number;
 }
-
+interface Reminder {
+  id: string;
+  text: string;
+  remind_at_ms: number;
+  status: string;
+  recurrence: string | null;
+  created_at: number;
+}
 interface TodayContext {
   date: string;
   goal: DailyGoal | null;
   entertainment_minutes: number;
   intervention_count: number;
+  due_reminders: Reminder[];
 }
 
-const STATUS_LABELS: Record<string, string> = {
-  planned: "计划中",
-  started: "进行中",
-  completed: "已完成",
-  skipped: "已跳过",
-  abandoned: "已放弃",
+const GOAL_STATUS: Record<string, { label: string; className: string }> = {
+  planned: { label: "计划中", className: "text-muted-foreground" },
+  started: { label: "进行中", className: "text-accent" },
+  completed: { label: "已完成", className: "text-success" },
+  skipped: { label: "已跳过", className: "text-muted-foreground" },
+  abandoned: { label: "已放弃", className: "text-danger" },
 };
 
 export default function TodayScreen() {
   const [ctx, setCtx] = useState<TodayContext | null>(null);
+  const [tasks, setTasks] = useState<Task[]>([]);
   const [goalInput, setGoalInput] = useState("");
+  const [taskInput, setTaskInput] = useState("");
   const [saving, setSaving] = useState(false);
 
-  async function loadContext() {
+  async function load() {
     try {
-      const data = await invoke<TodayContext>("get_today_context");
-      setCtx(data);
-      if (data.goal) setGoalInput(data.goal.raw_text);
+      const [c, t] = await Promise.all([
+        invoke<TodayContext>("get_today_context"),
+        invoke<Task[]>("list_tasks"),
+      ]);
+      setCtx(c);
+      setTasks(t);
+      if (c.goal && !goalInput) setGoalInput(c.goal.raw_text);
     } catch (e) {
-      console.error("get_today_context failed", e);
+      console.error("load today failed", e);
     }
   }
 
   useEffect(() => {
-    loadContext();
-    const id = setInterval(loadContext, 30_000);
+    load();
+    const id = setInterval(load, 30_000);
     return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function saveGoal() {
@@ -49,104 +74,176 @@ export default function TodayScreen() {
     setSaving(true);
     try {
       await invoke("set_goal", { text: goalInput.trim() });
-      await loadContext();
+      await load();
     } finally {
       setSaving(false);
     }
   }
 
-  async function markDone() {
+  async function setGoalStatus(status: string) {
     if (!ctx?.goal) return;
-    await invoke("update_goal_status", { id: ctx.goal.id, status: "completed" });
-    await loadContext();
+    await invoke("update_goal_status", { id: ctx.goal.id, status });
+    await load();
   }
 
-  const entertainmentMin = Math.round(ctx?.entertainment_minutes ?? 0);
-  const interventionCount = ctx?.intervention_count ?? 0;
+  async function addTask() {
+    const title = taskInput.trim();
+    if (!title) return;
+    setTaskInput("");
+    await invoke("create_task", { title, dueMs: null, note: null });
+    await load();
+  }
+
+  async function toggleTask(t: Task) {
+    const next = t.status === "done" ? "todo" : "done";
+    await invoke("set_task_status", { id: t.id, status: next });
+    await load();
+  }
+
+  async function removeTask(id: string) {
+    await invoke("delete_task", { id });
+    await load();
+  }
+
+  async function completeReminder(id: string) {
+    await invoke("set_reminder_status", { id, status: "done" });
+    await load();
+  }
+
+  const entMin = Math.round(ctx?.entertainment_minutes ?? 0);
+  const goal = ctx?.goal ?? null;
+  const dueReminders = ctx?.due_reminders ?? [];
+  const st = goal ? GOAL_STATUS[goal.status] ?? { label: goal.status, className: "text-muted-foreground" } : null;
+  const goalOpen = goal ? goal.status === "planned" || goal.status === "started" : false;
+  const openCount = tasks.filter((t) => t.status === "todo" || t.status === "doing").length;
 
   return (
-    <div style={styles.container}>
-      <h2 style={styles.title}>今日</h2>
-
-      {/* 目标卡片 */}
-      <div style={styles.card}>
-        <p style={styles.label}>今日目标</p>
-        {ctx?.goal ? (
-          <div>
-            <p style={styles.goalText}>{ctx.goal.raw_text}</p>
-            <p style={styles.status}>{STATUS_LABELS[ctx.goal.status] ?? ctx.goal.status}</p>
-            {ctx.goal.status === "planned" || ctx.goal.status === "started" ? (
-              <button style={styles.btnSuccess} onClick={markDone}>标记完成</button>
-            ) : null}
-          </div>
+    <div className="animate-in mx-auto flex max-w-md flex-col gap-3 p-4">
+      {/* 今日目标 */}
+      <Card className="flex flex-col gap-3 p-4">
+        <div className="flex items-center justify-between">
+          <CardLabel>今日目标</CardLabel>
+          {st && <span className={cn("text-xs font-medium", st.className)}>{st.label}</span>}
+        </div>
+        {goal ? (
+          <p className="text-[15px] font-medium leading-snug">{goal.raw_text}</p>
         ) : (
-          <p style={styles.empty}>还没有设置今日目标</p>
+          <p className="text-sm text-muted-foreground">还没设定今天要专注的那一件事。</p>
         )}
-        <div style={styles.inputRow}>
-          <input
-            style={styles.input}
+        <div className="flex gap-2">
+          <Input
             value={goalInput}
-            onChange={e => setGoalInput(e.target.value)}
-            placeholder={ctx?.goal ? "修改目标…" : "输入今日目标…"}
-            onKeyDown={e => e.key === "Enter" && saveGoal()}
+            onChange={(e) => setGoalInput(e.target.value)}
+            placeholder={goal ? "修改目标…" : "输入今日目标…"}
+            onKeyDown={(e) => e.key === "Enter" && saveGoal()}
           />
-          <button style={styles.btnPrimary} onClick={saveGoal} disabled={saving}>
-            {saving ? "…" : ctx?.goal ? "更新" : "设置"}
-          </button>
+          <Button variant="primary" onClick={saveGoal} disabled={saving}>
+            {saving ? "…" : goal ? "更新" : "设定"}
+          </Button>
         </div>
-      </div>
+        {goal && goalOpen && (
+          <div className="flex gap-2">
+            <Button variant="success" size="sm" onClick={() => setGoalStatus("completed")}>
+              <Check size={15} strokeWidth={2} />
+              完成
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => setGoalStatus("abandoned")}>
+              <Ban size={14} strokeWidth={1.75} />
+              放弃今日
+            </Button>
+          </div>
+        )}
+      </Card>
 
-      {/* 统计卡片 */}
-      <div style={styles.card}>
-        <p style={styles.label}>今日数据</p>
-        <div style={styles.statsRow}>
-          <StatItem
-            value={`${entertainmentMin} 分钟`}
-            label="娱乐时长"
-            warn={entertainmentMin > 60}
-          />
-          <StatItem value={`${interventionCount} 次`} label="干预次数" />
+      {/* 今日数据 */}
+      <Card className="p-4">
+        <CardLabel>今日数据</CardLabel>
+        <div className="mt-3 grid grid-cols-3 gap-3">
+          <Stat value={`${entMin}`} unit="min" label="娱乐时长" warn={entMin > 60} />
+          <Stat value={`${ctx?.intervention_count ?? 0}`} label="干预" />
+          <Stat value={`${openCount}`} label="待办" />
         </div>
-      </div>
+      </Card>
+
+      {/* 任务（增删查改） */}
+      <Card className="flex flex-col gap-3 p-4">
+        <CardLabel>任务</CardLabel>
+        <div className="flex gap-2">
+          <Input
+            value={taskInput}
+            onChange={(e) => setTaskInput(e.target.value)}
+            placeholder="加一条任务…"
+            onKeyDown={(e) => e.key === "Enter" && addTask()}
+          />
+          <Button variant="secondary" size="icon" onClick={addTask} aria-label="添加任务">
+            <Plus size={16} strokeWidth={2} />
+          </Button>
+        </div>
+        {tasks.length > 0 ? (
+          <ul className="flex flex-col">
+            {tasks.map((t) => {
+              const done = t.status === "done" || t.status === "dropped";
+              return (
+                <li key={t.id} className="group flex items-center gap-2.5 py-1.5">
+                  <button onClick={() => toggleTask(t)} className="shrink-0 text-muted-foreground transition-colors hover:text-accent" aria-label="切换完成">
+                    {done ? (
+                      <CircleCheck size={17} strokeWidth={1.75} className="text-success" />
+                    ) : (
+                      <Circle size={17} strokeWidth={1.75} />
+                    )}
+                  </button>
+                  <span className={cn("flex-1 text-sm leading-snug", done && "text-muted-foreground line-through")}>
+                    {t.title}
+                  </span>
+                  <button
+                    onClick={() => removeTask(t.id)}
+                    className="shrink-0 text-muted-foreground/40 opacity-0 transition-opacity hover:text-danger group-hover:opacity-100"
+                    aria-label="删除任务"
+                  >
+                    <X size={15} strokeWidth={2} />
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        ) : (
+          <p className="text-sm text-muted-foreground">还没有任务。加一条，或对 Codex 说句话。</p>
+        )}
+      </Card>
+
+      {/* 到期提醒 */}
+      {dueReminders.length > 0 && (
+        <Card className="border-warning/30 p-4">
+          <div className="flex items-center gap-2">
+            <Bell size={14} strokeWidth={1.75} className="text-warning" />
+            <CardLabel className="text-warning/90">到期提醒</CardLabel>
+          </div>
+          <ul className="mt-3 flex flex-col gap-2">
+            {dueReminders.map((r) => (
+              <li key={r.id} className="flex items-center gap-2 text-sm">
+                <Clock size={13} strokeWidth={1.75} className="shrink-0 text-muted-foreground" />
+                <span className="flex-1">{r.text}</span>
+                <span className="text-[11px] text-muted-foreground">{fmtClock(r.remind_at_ms)}</span>
+                <button onClick={() => completeReminder(r.id)} className="text-muted-foreground hover:text-success" aria-label="完成提醒">
+                  <Check size={15} strokeWidth={2} />
+                </button>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
     </div>
   );
 }
 
-function StatItem({ value, label, warn }: { value: string; label: string; warn?: boolean }) {
+function Stat({ value, unit, label, warn }: { value: string; unit?: string; label: string; warn?: boolean }) {
   return (
-    <div style={styles.statItem}>
-      <p style={{ ...styles.statValue, color: warn ? "#e05" : "#222" }}>{value}</p>
-      <p style={styles.statLabel}>{label}</p>
+    <div className="flex flex-col gap-0.5">
+      <div className="flex items-baseline gap-1">
+        <span className={cn("font-mono text-2xl font-semibold tabular-nums", warn && "text-warning")}>{value}</span>
+        {unit && <span className="text-xs text-muted-foreground">{unit}</span>}
+      </div>
+      <span className="text-[11px] text-muted-foreground">{label}</span>
     </div>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  container: { padding: "16px", fontFamily: "sans-serif", maxWidth: "480px", margin: "0 auto" },
-  title: { fontSize: "20px", fontWeight: 700, marginBottom: "16px" },
-  card: {
-    background: "#f8f8f8", borderRadius: "12px", padding: "16px", marginBottom: "12px",
-  },
-  label: { fontSize: "12px", color: "#888", marginBottom: "6px", textTransform: "uppercase" },
-  goalText: { fontSize: "16px", fontWeight: 600, marginBottom: "4px" },
-  status: { fontSize: "13px", color: "#555", marginBottom: "8px" },
-  empty: { fontSize: "14px", color: "#aaa", marginBottom: "8px" },
-  inputRow: { display: "flex", gap: "8px", marginTop: "8px" },
-  input: {
-    flex: 1, padding: "8px 12px", borderRadius: "8px",
-    border: "1px solid #ddd", fontSize: "14px",
-  },
-  btnPrimary: {
-    padding: "8px 16px", borderRadius: "8px", background: "#3b82f6",
-    color: "#fff", border: "none", cursor: "pointer", fontSize: "14px",
-  },
-  btnSuccess: {
-    padding: "6px 12px", borderRadius: "8px", background: "#22c55e",
-    color: "#fff", border: "none", cursor: "pointer", fontSize: "13px",
-    marginBottom: "8px",
-  },
-  statsRow: { display: "flex", gap: "24px" },
-  statItem: { textAlign: "center" },
-  statValue: { fontSize: "22px", fontWeight: 700, margin: 0 },
-  statLabel: { fontSize: "12px", color: "#888", margin: 0 },
-};

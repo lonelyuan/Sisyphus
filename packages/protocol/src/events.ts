@@ -55,6 +55,15 @@ export interface NoteTextPayload {
   text: string;
 }
 
+/** agent/knowledge_ingested：第二大脑写入一张知识卡片时的溯源面包屑（L1）。
+ *  可读知识本体存 Obsidian vault 的 `.md`；本事件只记「发生过 + 指针」。 */
+export interface KnowledgeIngestedPayload {
+  title: string;
+  path: string; // vault 内相对路径，如 "ai-security.md"
+  sources: string[]; // 来源 url / 引用
+  concept_count?: number;
+}
+
 export interface UrlVisitPayload {
   url_hash?: string;
   title?: string; // L2，默认不传

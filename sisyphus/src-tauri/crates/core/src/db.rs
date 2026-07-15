@@ -261,4 +261,85 @@ CREATE TABLE IF NOT EXISTS interventions (
     responded_at    INTEGER,
     outcome         TEXT
 );
+
+-- ── 反思平面 Artifact store（Phase 1.2：原声笔记）────────────────────────────
+-- 铁律：每种有状态对象各自建表，禁止多态大表。intent_candidates 是 capture→artifact
+-- 的「桥/暂存」（非 artifact 本身），承载来源/置信度/可回滚审计。
+
+-- 意图候选：Codex 对一条 capture 生成的结构化候选（Core 不做推断，只持久化）。
+CREATE TABLE IF NOT EXISTS intent_candidates (
+    id                TEXT PRIMARY KEY,
+    capture_event_id  TEXT NOT NULL,               -- → raw_events.event_id（note_text）
+    kind              TEXT NOT NULL,               -- goal | task | reminder | note
+    proposed_json     TEXT NOT NULL,               -- 候选内容（title/body/due 等）
+    confidence        REAL NOT NULL DEFAULT 0,
+    source            TEXT NOT NULL DEFAULT 'agent',
+    status            TEXT NOT NULL DEFAULT 'proposed', -- proposed|accepted|edited|ignored
+    created_at        INTEGER NOT NULL,
+    decided_at        INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_intent_capture ON intent_candidates (capture_event_id);
+CREATE INDEX IF NOT EXISTS idx_intent_status  ON intent_candidates (status);
+
+-- 任务。
+CREATE TABLE IF NOT EXISTS tasks (
+    id              TEXT PRIMARY KEY,
+    created_at      INTEGER NOT NULL,
+    source_event_id TEXT,                          -- 源 capture 事件（溯源便利）
+    intent_id       TEXT,                          -- → intent_candidates.id（回滚锚点）
+    title           TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'todo',  -- todo|doing|done|dropped
+    due_ms          INTEGER,
+    priority        INTEGER NOT NULL DEFAULT 0,
+    note            TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks (status);
+
+-- 笔记 / 素材 / 偏好（打 tag 区分）。
+CREATE TABLE IF NOT EXISTS notes (
+    id              TEXT PRIMARY KEY,
+    created_at      INTEGER NOT NULL,
+    source_event_id TEXT,
+    intent_id       TEXT,
+    title           TEXT,
+    body            TEXT NOT NULL DEFAULT '',
+    tags_json       TEXT NOT NULL DEFAULT '[]',
+    status          TEXT NOT NULL DEFAULT 'active' -- active|archived
+);
+
+-- 提醒（MVP 被动：query_context 暴露到期项，主动触发留待采集器后续接线）。
+CREATE TABLE IF NOT EXISTS reminders (
+    id              TEXT PRIMARY KEY,
+    created_at      INTEGER NOT NULL,
+    source_event_id TEXT,
+    intent_id       TEXT,
+    remind_at_ms    INTEGER NOT NULL,
+    text            TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'pending', -- pending|done|cancelled
+    recurrence      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders (status, remind_at_ms);
+
+-- ── 第二大脑知识索引（Phase 1.3）─────────────────────────────────────────────
+-- 可读知识本体是 Obsidian vault 的 .md（投影）；本表是可查询真相 + 溯源指针。
+CREATE TABLE IF NOT EXISTS knowledge_notes (
+    id           TEXT PRIMARY KEY,
+    path         TEXT NOT NULL UNIQUE,          -- vault 内相对路径，如 "ai-security.md"
+    title        TEXT NOT NULL,
+    tags_json    TEXT NOT NULL DEFAULT '[]',
+    sources_json TEXT NOT NULL DEFAULT '[]',
+    content_hash TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'active', -- active|stale|duplicate|pruned
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_status ON knowledge_notes (status);
+
+-- 用户可编辑的监控名单（哪些 app 算娱乐）。分类判定：此表 > 内置白名单。
+-- 桌面采集器与 Android JNI 都读它，故加/删一个 app 跨端立即生效、无需重编。
+CREATE TABLE IF NOT EXISTS monitored_apps (
+    bundle_id  TEXT PRIMARY KEY,          -- macOS bundle id 或 Android 包名
+    category   TEXT NOT NULL,             -- entertainment.video|game|social|news
+    created_at INTEGER NOT NULL
+);
 "#;

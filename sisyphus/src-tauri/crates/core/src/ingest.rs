@@ -113,13 +113,35 @@ pub fn capture_text(
     device_id: &str,
     text: &str,
 ) -> rusqlite::Result<String> {
+    capture_note(conn, user_id, device_id, text, "manual", None)
+}
+
+/// 便捷封装：把一份素材写成 `agent/note_text` 事件，`category="material"`（第二大脑 ingest_document）。
+/// 打上 material 分类，使其**不进**原声笔记的意图三分收件箱（list_captures 会排除）。
+pub fn capture_material(
+    conn: &Connection,
+    user_id: &str,
+    device_id: &str,
+    text: &str,
+) -> rusqlite::Result<String> {
+    capture_note(conn, user_id, device_id, text, "agent", Some("material"))
+}
+
+fn capture_note(
+    conn: &Connection,
+    user_id: &str,
+    device_id: &str,
+    text: &str,
+    source: &str,
+    category: Option<&str>,
+) -> rusqlite::Result<String> {
     ingest_event(
         conn,
         user_id,
         device_id,
         NewEvent {
             event_id: None,
-            source: "manual".to_string(),
+            source: source.to_string(),
             layer: "raw".to_string(),
             event_type: "note_text".to_string(),
             time_mode: "point".to_string(),
@@ -127,7 +149,7 @@ pub fn capture_text(
             start_time: None,
             end_time: None,
             entity: None,
-            category: None,
+            category: category.map(|c| c.to_string()),
             payload: serde_json::json!({ "text": text }),
             parent_event_ids: vec![],
             privacy_level: "L1".to_string(),

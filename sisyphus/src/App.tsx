@@ -1,9 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { invoke, addPluginListener, type PluginListener } from "@tauri-apps/api/core";
+import { Target, ScrollText, Settings2 } from "lucide-react";
 import TodayScreen from "./screens/TodayScreen";
+import RecordsScreen from "./screens/RecordsScreen";
 import SettingsScreen from "./screens/SettingsScreen";
+import { cn } from "@/lib/utils";
 
-type Tab = "today" | "settings";
+type Tab = "today" | "records" | "settings";
 
 interface UsageEvent {
   pkg: string;
@@ -21,10 +24,9 @@ interface FindingOutput {
 export default function App() {
   const [tab, setTab] = useState<Tab>("today");
 
-  // 监听 Kotlin UsagePlugin 推送的前台 app 事件，触发 Rust 规则评估
+  // 监听 Kotlin UsagePlugin 推送的前台 app 事件，触发 Rust 规则评估（Android）
   useEffect(() => {
     let listener: PluginListener | null = null;
-
     addPluginListener<UsageEvent>("usage", "usage_event", async (event) => {
       try {
         const finding = await invoke<FindingOutput | null>("evaluate_rules", {
@@ -45,78 +47,106 @@ export default function App() {
       } catch (e) {
         console.error("evaluate_rules error", e);
       }
-    }).then(l => { listener = l; }).catch(console.error);
-
-    return () => { listener?.unregister(); };
+    })
+      .then((l) => {
+        listener = l;
+      })
+      .catch(console.error);
+    return () => {
+      listener?.unregister();
+    };
   }, []);
 
   // 监听通知按钮响应事件
   useEffect(() => {
     let listener: PluginListener | null = null;
-
     addPluginListener<{ intervention_id: string; action: string }>(
       "notification",
       "action_taken",
       async ({ intervention_id, action }) => {
         try {
-          await invoke("record_feedback", {
-            interventionId: intervention_id,
-            action,
-          });
+          await invoke("record_feedback", { interventionId: intervention_id, action });
         } catch (e) {
           console.error("record_feedback error", e);
         }
-      }
-    ).then(l => { listener = l; }).catch(console.error);
-
-    return () => { listener?.unregister(); };
+      },
+    )
+      .then((l) => {
+        listener = l;
+      })
+      .catch(console.error);
+    return () => {
+      listener?.unregister();
+    };
   }, []);
 
   return (
-    <div style={styles.root}>
-      <div style={styles.content}>
-        {tab === "today"    && <TodayScreen />}
-        {tab === "settings" && <SettingsScreen />}
-      </div>
+    <div className="flex h-screen flex-col bg-background text-foreground">
+      {/* 顶栏 */}
+      <header className="flex shrink-0 items-center justify-between border-b border-border px-5 py-3">
+        <div className="flex items-center gap-2">
+          <span className="text-[15px] leading-none">⛰</span>
+          <span className="text-sm font-semibold tracking-tight">西西弗斯</span>
+        </div>
+        <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <span className="h-1.5 w-1.5 rounded-full bg-success" />
+          常驻中
+        </div>
+      </header>
 
-      {/* 底部 Tab 栏 */}
-      <nav style={styles.tabBar}>
-        <TabItem label="今日" icon="🎯" active={tab === "today"}    onClick={() => setTab("today")} />
-        <TabItem label="设置" icon="⚙️" active={tab === "settings"} onClick={() => setTab("settings")} />
+      {/* 内容区（唯一滚动区域） */}
+      <main className="flex-1 overflow-y-auto">
+        {tab === "today" && <TodayScreen />}
+        {tab === "records" && <RecordsScreen />}
+        {tab === "settings" && <SettingsScreen />}
+      </main>
+
+      {/* 底部 tab 栏 */}
+      <nav className="flex shrink-0 border-t border-border">
+        <TabItem
+          label="今日"
+          icon={<Target size={18} strokeWidth={1.75} />}
+          active={tab === "today"}
+          onClick={() => setTab("today")}
+        />
+        <TabItem
+          label="记录"
+          icon={<ScrollText size={18} strokeWidth={1.75} />}
+          active={tab === "records"}
+          onClick={() => setTab("records")}
+        />
+        <TabItem
+          label="设置"
+          icon={<Settings2 size={18} strokeWidth={1.75} />}
+          active={tab === "settings"}
+          onClick={() => setTab("settings")}
+        />
       </nav>
     </div>
   );
 }
 
 function TabItem({
-  label, icon, active, onClick,
-}: { label: string; icon: string; active: boolean; onClick: () => void }) {
+  label,
+  icon,
+  active,
+  onClick,
+}: {
+  label: string;
+  icon: ReactNode;
+  active: boolean;
+  onClick: () => void;
+}) {
   return (
     <button
-      style={{ ...styles.tabItem, color: active ? "#3b82f6" : "#888" }}
       onClick={onClick}
+      className={cn(
+        "flex flex-1 flex-col items-center gap-1 py-2.5 text-[11px] transition-colors",
+        active ? "text-accent" : "text-muted-foreground hover:text-foreground",
+      )}
     >
-      <span style={{ fontSize: "20px" }}>{icon}</span>
-      <span style={{ fontSize: "11px" }}>{label}</span>
+      {icon}
+      <span>{label}</span>
     </button>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  root: {
-    display: "flex", flexDirection: "column",
-    height: "100vh", overflow: "hidden",
-    fontFamily: "sans-serif",
-  },
-  content: { flex: 1, overflowY: "auto" },
-  tabBar: {
-    display: "flex", borderTop: "1px solid #e5e7eb",
-    background: "#fff", paddingBottom: "env(safe-area-inset-bottom, 0px)",
-  },
-  tabItem: {
-    flex: 1, display: "flex", flexDirection: "column",
-    alignItems: "center", padding: "8px 0",
-    background: "none", border: "none", cursor: "pointer",
-    gap: "2px",
-  },
-};

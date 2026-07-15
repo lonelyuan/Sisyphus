@@ -1,166 +1,306 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { platform as osPlatform } from "@tauri-apps/plugin-os";
+import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { Power, FolderOpen, Radar, Activity, Info, Eye, Plus, X } from "lucide-react";
+import { Card, CardLabel } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
+import { prettyApp, categoryLabel } from "@/lib/format";
+
+interface MonitoredApp {
+  id: string;
+  category: string;
+  platform: string;
+  source: string;
+}
 
 export default function SettingsScreen() {
+  const [platform, setPlatform] = useState("");
+  const [autostart, setAutostart] = useState<boolean | null>(null);
+  const [vault, setVault] = useState("");
   const [usageGranted, setUsageGranted] = useState<boolean | null>(null);
   const [collecting, setCollecting] = useState(false);
-  const [errMsg, setErrMsg] = useState("");
-  const [platformName, setPlatformName] = useState("");
+  const [monitored, setMonitored] = useState<MonitoredApp[]>([]);
+  const [newId, setNewId] = useState("");
+  const [newCat, setNewCat] = useState("entertainment.video");
+  const [err, setErr] = useState("");
 
-  // 检测平台 + 刷新权限，独立 effect 避免闭包捕获过期值
   useEffect(() => {
-    detectPlatformAndRefresh();
-  }, []);
-
-  async function detectPlatformAndRefresh() {
-    // 通过 Tauri 命令安全获取平台名，不依赖 plugin-os 初始化时序
-    try {
-      const p = await invoke<string>("plugin:os|platform");
-      setPlatformName(p);
-      if (p === "android") await refreshPermission();
-    } catch {
-      // plugin-os 未初始化时降级：直接尝试 checkPermission，失败则是非 Android
+    (async () => {
+      let p = "";
       try {
-        const res = await invoke<{ granted: boolean }>("plugin:usage|checkPermission");
-        setPlatformName("android");
-        setUsageGranted(res.granted);
+        // 官方 JS API（比裸 invoke 可靠）：返回 "android" | "macos" | "windows" | ...
+        p = await osPlatform();
       } catch {
-        setPlatformName("desktop");
+        // 兜底：os 插件不可用时，android-only 的 usage 命令能调通即安卓。
+        try {
+          await invoke("check_usage_permission");
+          p = "android";
+        } catch {
+          p = "desktop";
+        }
       }
-    }
-  }
+      setPlatform(p);
+      if (p === "android") await refreshPermission();
+    })();
+    isEnabled().then(setAutostart).catch(() => setAutostart(null));
+    invoke<string>("get_vault_path").then(setVault).catch(() => {});
+    loadMonitored();
+  }, []);
 
   async function refreshPermission() {
     try {
-      const res = await invoke<{ granted: boolean }>("plugin:usage|checkPermission");
-      setUsageGranted(res.granted);
-    } catch (e: unknown) {
-      setErrMsg("checkPermission 失败: " + String(e));
+      const granted = await invoke<boolean>("check_usage_permission");
+      setUsageGranted(granted);
+    } catch (e) {
+      setErr("检查权限失败: " + String(e));
+    }
+  }
+
+  async function toggleAutostart() {
+    setErr("");
+    try {
+      if (autostart) {
+        await disable();
+        setAutostart(false);
+      } else {
+        await enable();
+        setAutostart(true);
+      }
+    } catch (e) {
+      setErr("开机自启切换失败: " + String(e));
+    }
+  }
+
+  async function openVault() {
+    try {
+      await revealItemInDir(vault);
+    } catch (e) {
+      setErr("打开知识库失败: " + String(e));
+    }
+  }
+
+  function loadMonitored() {
+    invoke<MonitoredApp[]>("list_monitored_apps").then(setMonitored).catch(() => {});
+  }
+
+  async function addApp() {
+    const id = newId.trim();
+    if (!id) return;
+    setErr("");
+    try {
+      await invoke("add_monitored_app", { id, category: newCat });
+      setNewId("");
+      loadMonitored();
+    } catch (e) {
+      setErr("添加失败: " + String(e));
+    }
+  }
+
+  async function removeApp(id: string) {
+    try {
+      await invoke("remove_monitored_app", { id });
+      loadMonitored();
+    } catch (e) {
+      setErr("删除失败: " + String(e));
     }
   }
 
   async function requestPermission() {
-    setErrMsg("");
+    setErr("");
     try {
-      await invoke("plugin:usage|requestPermission");
-      // 等用户从设置页返回后刷新（onResume 会触发，但 WebView 内无此回调，轮询一次）
+      await invoke("request_usage_permission");
       setTimeout(refreshPermission, 1500);
       setTimeout(refreshPermission, 3000);
-    } catch (e: unknown) {
-      setErrMsg("requestPermission 失败: " + String(e));
+    } catch (e) {
+      setErr("跳转授权失败: " + String(e));
     }
   }
 
   async function toggleCollector() {
-    setErrMsg("");
+    setErr("");
     try {
-      if (collecting) {
-        await invoke("plugin:usage|stopCollector");
-        setCollecting(false);
-      } else {
-        await invoke("plugin:usage|startCollector");
-        setCollecting(true);
-      }
-    } catch (e: unknown) {
-      setErrMsg("采集服务操作失败: " + String(e));
+      await invoke(collecting ? "stop_collector" : "start_collector");
+      setCollecting(!collecting);
+    } catch (e) {
+      setErr("采集服务操作失败: " + String(e));
     }
   }
 
-  const isAndroid = platformName === "android";
+  const isAndroid = platform === "android";
+  const apps = monitored.filter(
+    (m) => m.platform === (isAndroid ? "android" : "desktop") || m.platform === "custom",
+  );
 
   return (
-    <div style={s.container}>
-      <h2 style={s.title}>设置</h2>
+    <div className="animate-in mx-auto flex max-w-md flex-col gap-3 p-4">
+      {err && (
+        <Card className="border-danger/40 bg-danger/10 p-3 text-xs text-danger">{err}</Card>
+      )}
 
-      {/* 错误提示 */}
-      {errMsg ? (
-        <div style={s.errBox}>
-          <strong>错误</strong>
-          <p style={{ margin: "4px 0 0", fontSize: "12px", wordBreak: "break-all" }}>{errMsg}</p>
+      {/* 监控名单（增删查改） */}
+      <Card className="flex flex-col gap-3 p-4">
+        <div className="flex items-center gap-2">
+          <Eye size={14} strokeWidth={1.75} className="text-muted-foreground" />
+          <CardLabel>监控名单（{apps.length}）</CardLabel>
         </div>
-      ) : null}
 
-      {/* 平台调试信息 */}
-      <div style={s.card}>
-        <p style={s.label}>平台</p>
-        <p style={s.desc}>{platformName || "检测中…"}</p>
-      </div>
+        {/* 增：包名 + 分类 */}
+        <div className="flex gap-2">
+          <Input
+            value={newId}
+            onChange={(e) => setNewId(e.target.value)}
+            placeholder={isAndroid ? "包名，如 com.ss.android.ugc.aweme" : "bundle id，如 com.apple.TV"}
+            onKeyDown={(e) => e.key === "Enter" && addApp()}
+          />
+          <select
+            value={newCat}
+            onChange={(e) => setNewCat(e.target.value)}
+            className="h-9 shrink-0 rounded-md border border-input bg-input px-2 text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+          >
+            <option value="entertainment.video">视频</option>
+            <option value="entertainment.game">游戏</option>
+            <option value="entertainment.social">社交</option>
+            <option value="entertainment.news">资讯</option>
+          </select>
+          <Button variant="secondary" size="icon" onClick={addApp} aria-label="添加监控 app">
+            <Plus size={16} strokeWidth={2} />
+          </Button>
+        </div>
 
-      {isAndroid && (
-        <>
-          <div style={s.card}>
-            <p style={s.label}>应用使用情况权限</p>
-            <div style={s.permRow}>
-              <div>
-                <span style={{ ...s.badge, background: usageGranted ? "#22c55e" : "#ef4444" }}>
-                  {usageGranted === null ? "检查中…" : usageGranted ? "已授权" : "未授权"}
+        {/* 查 + 删 */}
+        {apps.length ? (
+          <ul className="flex flex-col gap-1.5">
+            {apps.map((m) => (
+              <li key={m.platform + m.id} className="group flex items-center gap-2">
+                <span className="flex-1 truncate text-sm">{prettyApp(m.id)}</span>
+                <code className="max-w-[120px] truncate font-mono text-[10px] text-muted-foreground/60">
+                  {m.id}
+                </code>
+                <span className="shrink-0 rounded bg-warning/15 px-1.5 py-0.5 text-[10px] text-warning">
+                  {categoryLabel(m.category)}
                 </span>
-                <p style={s.desc}>采集前台 app 切换事件，用于分析娱乐时长</p>
-              </div>
-              {!usageGranted && (
-                <button style={s.btnPrimary} onClick={requestPermission}>
-                  前往授权
-                </button>
-              )}
-            </div>
-          </div>
+                {m.source === "user" ? (
+                  <button
+                    onClick={() => removeApp(m.id)}
+                    className="shrink-0 text-muted-foreground/40 transition-colors hover:text-danger"
+                    aria-label="删除"
+                  >
+                    <X size={14} strokeWidth={2} />
+                  </button>
+                ) : (
+                  <span className="w-[14px] shrink-0 text-center text-[10px] text-muted-foreground/40">·</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-sm text-muted-foreground">当前平台暂无监控项。</p>
+        )}
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          停留在名单内的 app 超阈值触发干预。自定义项跨端即时生效（安卓无需重编）；内置项不可删，可用同名自定义项覆盖分类。
+          {!isAndroid && " 桌面浏览器内刷视频需浏览器插件（延后）。"}
+        </p>
+      </Card>
 
-          <div style={s.card}>
-            <p style={s.label}>采集服务</p>
-            <div style={s.row}>
-              <span style={s.desc}>后台持续采集（前台通知常驻）</span>
-              <button
-                style={collecting ? s.btnStop : s.btnStart}
-                onClick={toggleCollector}
-                disabled={!usageGranted}
-              >
-                {collecting ? "停止" : "启动"}
-              </button>
+      {!isAndroid && (
+        <>
+          {/* 后台常驻 */}
+          <Card className="flex items-start gap-3 p-4">
+            <Radar size={16} strokeWidth={1.75} className="mt-0.5 shrink-0 text-accent" />
+            <div className="flex flex-col gap-1">
+              <CardLabel>后台常驻</CardLabel>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                关窗后从程序坞隐藏、仅保留菜单栏图标（不占程序坞）；采集器持续在后台运行。点菜单栏图标唤回窗口，「退出」才结束进程。
+              </p>
             </div>
-            {!usageGranted && <p style={s.hint}>需先授予"应用使用情况"权限</p>}
-          </div>
+          </Card>
+
+          {/* 开机自启 */}
+          <Card className="flex items-center justify-between gap-3 p-4">
+            <div className="flex items-start gap-3">
+              <Power size={16} strokeWidth={1.75} className="mt-0.5 shrink-0 text-muted-foreground" />
+              <div className="flex flex-col gap-1">
+                <CardLabel>开机自启</CardLabel>
+                <p className="text-xs text-muted-foreground">登录时自动启动，跨重启常驻采集</p>
+              </div>
+            </div>
+            <Switch
+              checked={autostart ?? false}
+              disabled={autostart === null}
+              onCheckedChange={toggleAutostart}
+            />
+          </Card>
+
+          {/* 知识库 */}
+          <Card className="flex flex-col gap-3 p-4">
+            <div className="flex items-center gap-2">
+              <FolderOpen size={14} strokeWidth={1.75} className="text-muted-foreground" />
+              <CardLabel>第二大脑知识库</CardLabel>
+            </div>
+            <code className="block truncate rounded-md border border-border bg-muted px-2.5 py-2 font-mono text-[11px] text-muted-foreground">
+              {vault || "…"}
+            </code>
+            <Button variant="secondary" size="sm" className="self-start" onClick={openVault}>
+              <FolderOpen size={14} strokeWidth={1.75} />
+              在 Finder 打开（可作为 Obsidian 库）
+            </Button>
+          </Card>
         </>
       )}
 
-      {!isAndroid && platformName && (
-        <div style={s.card}>
-          <p style={s.label}>桌面端</p>
-          <p style={s.desc}>活动窗口采集在 Phase 2 实现。</p>
-        </div>
+      {isAndroid && (
+        <>
+          <Card className="flex flex-col gap-3 p-4">
+            <div className="flex items-center gap-2">
+              <Activity size={14} strokeWidth={1.75} className="text-muted-foreground" />
+              <CardLabel>应用使用情况权限</CardLabel>
+            </div>
+            <div className="flex items-center justify-between">
+              <span
+                className={
+                  "rounded-full px-2 py-0.5 text-[11px] " +
+                  (usageGranted ? "bg-success/15 text-success" : "bg-danger/15 text-danger")
+                }
+              >
+                {usageGranted === null ? "检查中…" : usageGranted ? "已授权" : "未授权"}
+              </span>
+              {!usageGranted && (
+                <Button size="sm" onClick={requestPermission}>
+                  前往授权
+                </Button>
+              )}
+            </div>
+          </Card>
+
+          <Card className="flex items-center justify-between gap-3 p-4">
+            <div className="flex flex-col gap-1">
+              <CardLabel>采集服务</CardLabel>
+              <p className="text-xs text-muted-foreground">后台持续采集（前台通知常驻）</p>
+            </div>
+            <Button
+              variant={collecting ? "secondary" : "primary"}
+              size="sm"
+              disabled={!usageGranted}
+              onClick={toggleCollector}
+            >
+              {collecting ? "停止" : "启动"}
+            </Button>
+          </Card>
+        </>
       )}
 
-      <div style={s.card}>
-        <p style={s.label}>版本</p>
-        <p style={s.desc}>Sisyphus v0.1.0 · Phase 1</p>
+      {/* 页脚 */}
+      <div className="mt-1 flex items-center justify-between px-1 text-[11px] text-muted-foreground">
+        <span className="flex items-center gap-1.5">
+          <Info size={12} strokeWidth={1.75} />
+          Sisyphus v0.1.0 · Phase 1
+        </span>
+        <span>{platform || "…"}</span>
       </div>
     </div>
   );
 }
-
-const s: Record<string, React.CSSProperties> = {
-  container: { padding: "16px", fontFamily: "sans-serif", maxWidth: "480px", margin: "0 auto" },
-  title: { fontSize: "20px", fontWeight: 700, marginBottom: "16px" },
-  card: { background: "#f8f8f8", borderRadius: "12px", padding: "16px", marginBottom: "12px" },
-  errBox: {
-    background: "#fef2f2", border: "1px solid #fca5a5", borderRadius: "12px",
-    padding: "12px 16px", marginBottom: "12px", color: "#b91c1c",
-  },
-  label: { fontSize: "12px", color: "#888", marginBottom: "8px", textTransform: "uppercase" },
-  permRow: { display: "flex", justifyContent: "space-between", alignItems: "flex-start" },
-  badge: { fontSize: "12px", color: "#fff", padding: "2px 8px", borderRadius: "999px" },
-  desc: { fontSize: "13px", color: "#555", marginTop: "4px" },
-  hint: { fontSize: "12px", color: "#f59e0b", marginTop: "8px" },
-  row: { display: "flex", justifyContent: "space-between", alignItems: "center" },
-  btnPrimary: {
-    padding: "6px 14px", borderRadius: "8px", background: "#3b82f6",
-    color: "#fff", border: "none", cursor: "pointer", fontSize: "13px", whiteSpace: "nowrap",
-  },
-  btnStart: {
-    padding: "6px 14px", borderRadius: "8px", background: "#22c55e",
-    color: "#fff", border: "none", cursor: "pointer", fontSize: "13px",
-  },
-  btnStop: {
-    padding: "6px 14px", borderRadius: "8px", background: "#6b7280",
-    color: "#fff", border: "none", cursor: "pointer", fontSize: "13px",
-  },
-};

@@ -1,0 +1,20 @@
+{
+  "name": "sisyphus-knowledge-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "App→Codex TS SDK 派发：给定主题跑 Codex 深研并把概念卡片写入 Sisyphus 知识库（Obsidian vault）",
+  "bin": {
+    "sisyphus-knowledge-agent": "index.mjs"
+  },
+  "scripts": {
+    "dispatch": "node index.mjs",
+    "dryrun": "SISYPHUS_AGENT_DRYRUN=1 node index.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@openai/codex-sdk": "^0.144.4"
+  }
+}

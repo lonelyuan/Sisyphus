@@ -14,7 +14,7 @@ use rusqlite::Connection;
 use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
 
-use sisyphus_core::category::categorize_desktop;
+use sisyphus_core::category::categorize;
 use sisyphus_core::ingest::{ingest_event, NewEvent};
 use sisyphus_core::rule_engine::config::RuleConfig;
 use sisyphus_core::rule_engine::{RuleContext, RuleEngine};
@@ -31,7 +31,7 @@ const POLL_SECS: u64 = 15;
 /// 进行中的前台会话（内存态，防漏算：未切走的会话不在 DB）。
 struct Session {
     bundle: String,
-    category: Option<&'static str>,
+    category: Option<String>,
     start_ms: i64,
 }
 
@@ -48,7 +48,7 @@ pub fn run(db_path: PathBuf, app: AppHandle) {
     let engine = RuleEngine::new(RuleConfig::default());
 
     let mut session: Option<Session> = None;
-    eprintln!("[collector] macOS 前台采集器启动，poll={POLL_SECS}s");
+    eprintln!("[collector] macOS 前台采集器启动，poll={POLL_SECS}s（监控名单在 App 设置页可增删）");
 
     loop {
         if let Err(e) = tick(&conn, &engine, &app, &mut session) {
@@ -69,7 +69,8 @@ fn tick(
         Some(b) => b,
         None => return Ok(()), // 取不到（如锁屏/无权限），本 tick 跳过
     };
-    let category = categorize_desktop(&front);
+    // 统一分类（用户表 + 内置白名单，热生效）。
+    let category = categorize(conn, &front).map_err(|e| e.to_string())?;
     eprintln!("[collector] front={front} category={category:?}");
 
     // 前台 app 变化：关闭上一段会话，写成 app_foreground 区间事件。
@@ -80,14 +81,14 @@ fn tick(
         }
         *session = Some(Session {
             bundle: front.clone(),
-            category,
+            category: category.clone(),
             start_ms: now,
         });
     }
 
     // 当前进行中的娱乐时长（防漏算，注入规则）。
     let active_ms = match session.as_ref() {
-        Some(s) if is_entertainment(s.category) => now - s.start_ms,
+        Some(s) if is_entertainment(s.category.as_deref()) => now - s.start_ms,
         _ => 0,
     };
 
@@ -99,39 +100,18 @@ fn tick(
         user_id: USER_ID.to_string(),
         device_id: DEVICE_ID.to_string(),
         current_app: Some(front),
-        current_category: category.map(|c| c.to_string()),
+        current_category: category.clone(),
         active_entertainment_ms: active_ms,
         media_playing_since_ms: 0,
         recent_scroll_count: 0,
         today_goal: goal,
     };
 
-    if let Some(f) = engine.evaluate(&ctx, conn).map_err(|e| e.to_string())? {
-        let goal_text = ctx
-            .today_goal
-            .as_ref()
-            .map(|g| g.raw_text.as_str())
-            .unwrap_or("今日目标");
-        let total_min = (ctx.active_entertainment_ms / 60_000).max(1);
-        let prefix = if f.severity == "high" { "⚠️ " } else { "" };
-        let message = format!(
-            "{prefix}你已连续刷了 {total_min} 分钟娱乐内容。\n今日目标：{goal_text}"
-        );
-
-        let intervention_id = uuid_v4();
-        db::insert_intervention(
-            conn,
-            &intervention_id,
-            &f.rule_id,
-            now,
-            &f.severity,
-            &message,
-            r#"["start_task","take_rest","continue","abandon_today"]"#,
-        )
-        .map_err(|e| e.to_string())?;
-
-        notify(app, &message);
-        eprintln!("[collector] 干预触发 rule={} sev={}", f.rule_id, f.severity);
+    if let Some(out) = sisyphus_core::intervention::evaluate_and_record(conn, engine, &ctx)
+        .map_err(|e| e.to_string())?
+    {
+        notify(app, &out.message);
+        eprintln!("[collector] 干预触发 rule={} sev={}", out.rule_id, out.severity);
     }
 
     Ok(())
@@ -152,7 +132,7 @@ fn write_foreground_event(conn: &Connection, s: &Session, end_ms: i64) -> Result
             start_time: Some(s.start_ms),
             end_time: Some(end_ms),
             entity: Some(s.bundle.clone()),
-            category: s.category.map(|c| c.to_string()),
+            category: s.category.clone(),
             payload: serde_json::json!({}),
             parent_event_ids: vec![],
             privacy_level: "L0".to_string(),
@@ -195,8 +175,4 @@ fn notify(app: &AppHandle, body: &str) {
     {
         eprintln!("[collector] notification failed: {e}");
     }
-}
-
-fn uuid_v4() -> String {
-    uuid::Uuid::new_v4().to_string()
 }

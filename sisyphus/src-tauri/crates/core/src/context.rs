@@ -34,6 +34,10 @@ pub struct TodayContext {
     pub entertainment_minutes: f64,
     pub intervention_count: i64,
     pub recent_interventions: Vec<RecentIntervention>,
+    /// 未完成任务（todo/doing），供规划/复盘引用（Phase 1.2）。
+    pub open_tasks: Vec<crate::artifacts::Task>,
+    /// 已到期未处理的提醒（被动：由 Agent 在规划时提及）。
+    pub due_reminders: Vec<crate::artifacts::Reminder>,
 }
 
 pub fn today_context(conn: &Connection, user_id: &str) -> rusqlite::Result<TodayContext> {
@@ -57,23 +61,38 @@ pub fn today_context(conn: &Connection, user_id: &str) -> rusqlite::Result<Today
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
+    let open_tasks = crate::artifacts::list_open_tasks(conn)?;
+    let due_reminders =
+        crate::artifacts::list_due_reminders(conn, chrono::Utc::now().timestamp_millis())?;
+
     Ok(TodayContext {
         date: today,
         goal,
         entertainment_minutes: entertainment_ms as f64 / 60_000.0,
         intervention_count,
         recent_interventions: recent,
+        open_tasks,
+        due_reminders,
     })
 }
 
-/// 今日最小行动（MVP）：有未完成的今日目标则返回它，否则为空（提示用户先设目标）。
-/// 后续升级为 select_today_actions（多目标里选 1–3 个）。
+/// 今日最小行动（MVP）：优先返回今日目标，再补未完成任务（合并去重后至多 3 条）。
+/// 后续升级为策略选择（多目标里选 1–3 个）。
 pub fn today_actions(conn: &Connection) -> rusqlite::Result<Vec<String>> {
     let today = today_str();
-    match db::get_today_goal(conn, &today)? {
-        Some(g) => Ok(vec![g.raw_text]),
-        None => Ok(vec![]),
+    let mut actions: Vec<String> = Vec::new();
+    if let Some(g) = db::get_today_goal(conn, &today)? {
+        actions.push(g.raw_text);
     }
+    for t in crate::artifacts::list_open_tasks(conn)? {
+        if actions.len() >= 3 {
+            break;
+        }
+        if !actions.contains(&t.title) {
+            actions.push(t.title);
+        }
+    }
+    Ok(actions)
 }
 
 /// 设置今日目标（同一天复用 id，重复调用视为修改文本并重置为 planned）。返回 goal id。

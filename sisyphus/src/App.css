@@ -1,116 +1,104 @@
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
+@import "tailwindcss";
 
-.logo.react:hover {
-  filter: drop-shadow(0 0 2em #61dafb);
-}
+/* ============================================================
+   Codex 风 · 深色极简设计 token（dark-only，个人自用 App）
+   近黑底 + 近白前景 + 单一强调色(periwinkle) + 克制边框 + 扁平卡片
+   ============================================================ */
 :root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
+  --background: #0a0a0b;
+  --foreground: #e9e9ec;
+  --card: #111214;
+  --card-foreground: #e9e9ec;
+  --muted: #1a1b1e;
+  --muted-foreground: #8a8c93;
+  --border: #26272b;
+  --input: #1c1d21;
+  --primary: #fafafa;
+  --primary-foreground: #0a0a0b;
+  --accent: #8b93ff;
+  --accent-foreground: #0a0a0b;
+  --success: #34d399;
+  --warning: #fbbf24;
+  --danger: #f87171;
+  --ring: #8b93ff;
+  --radius: 0.75rem;
+}
 
-  color: #0f0f0f;
-  background-color: #f6f6f6;
+/* 映射到 Tailwind 工具类：bg-background / text-foreground / border-border / bg-card /
+   text-muted-foreground / bg-primary / bg-accent / ring-ring / rounded-lg 等 */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-ring: var(--ring);
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 4px);
+  --radius-sm: calc(var(--radius) - 6px);
+}
 
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
+/* ---- reset + 基线 ---- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+body {
+  overflow: hidden; /* 外层不滚，滚动交给内部内容区 */
+  background: var(--background);
+  color: var(--foreground);
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", system-ui,
+    "PingFang SC", "Microsoft YaHei", sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
+  text-rendering: optimizeLegibility;
 }
 
-.container {
-  margin: 0;
-  padding-top: 10vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
+/* 细而克制的滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(130, 130, 130, 0.28);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(130, 130, 130, 0.5);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
-  display: flex;
-  justify-content: center;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-}
-
-button {
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
-}
-
-input,
-button {
-  outline: none;
-}
-
-#greet-input {
-  margin-right: 5px;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
+/* 微妙入场动效 */
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
   }
-
-  a:hover {
-    color: #24c8db;
+  to {
+    opacity: 1;
+    transform: none;
   }
-
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
-  }
-  button:active {
-    background-color: #0f0f0f69;
-  }
+}
+.animate-in {
+  animation: fade-in-up 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
 }

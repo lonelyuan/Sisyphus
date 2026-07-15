@@ -5,6 +5,7 @@ use sisyphus_core::context;
 use sisyphus_core::db;
 use sisyphus_core::rule_engine::config::RuleConfig;
 use sisyphus_core::rule_engine::{RuleContext, RuleEngine};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -13,8 +14,17 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// 进程内唯一的临时库路径：pid + 纳秒 + 原子计数，避免并行测试线程撞同一文件
+/// （毫秒级 now_ms 会碰撞，导致两测试共享库、目标串味）。
+static COUNTER: AtomicU64 = AtomicU64::new(0);
+
 fn temp_db() -> rusqlite::Connection {
-    let path = std::env::temp_dir().join(format!("sis_test_{}_{}.db", std::process::id(), now_ms()));
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("sis_test_{}_{}_{}.db", std::process::id(), nanos, n));
     let _ = std::fs::remove_file(&path);
     db::open(path.to_str().unwrap()).unwrap()
 }

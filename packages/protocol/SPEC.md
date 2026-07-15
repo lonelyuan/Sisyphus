@@ -77,6 +77,7 @@ feedback     用户显式反馈
 - `window_active`（interval）：桌面活动窗口。`entity`=进程名。`payload`: `{ "window_title"?: string }`（title 属 L1/L2）。
 - `idle`（interval）：无操作。`payload`: `{}`。
 - `note_text`（point）：用户手动输入的自然语言 capture。`source`=`manual`，`payload`: `{ "text": string }`（属 L1）。反思平面 `capture` 工具写入此类型，是 Event log 与 Artifact store 之间"意图提取"的输入。
+- `knowledge_ingested`（point，v1.0+）：第二大脑写入一张知识卡片的**溯源面包屑**。`source`=`agent`，`payload`: `{ "title": string, "path": string, "sources": string[], "concept_count"?: int }`（title 属 L1）。可读知识本体存 Obsidian vault 的 `.md` 文件；`knowledge_notes` 索引行为可查询真相；本事件只记「发生过 + 指针」，让知识写入也进入统一 Event log（见 architecture.md §2「统一发生在数据层」）。
 - `scroll_burst`（interval, v1.1+）：**端侧预聚合**的滚动信号，不要逐次上报。`payload`: `{ "scroll_count": int, "window_sec": int, "avg_interval_ms": int }`。
 
 ### session 层
