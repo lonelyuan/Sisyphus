@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Sisyphus Collector",
+  "version": "0.1.0",
+  "description": "采集当前 tab 的 domain/title/访问时间，经 Native Messaging 转给桌面端。",
+  "permissions": ["tabs", "idle"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "icons": {
+    "128": "icon128.png"
+  }
+}

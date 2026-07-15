@@ -1,0 +1,44 @@
+# ---- OS ----
+.DS_Store
+
+# ---- Editors / IDE ----
+.idea/
+*.iml
+.vscode/*
+!.vscode/extensions.json
+
+# ---- Node / TS ----
+node_modules/
+dist/
+dist-ssr/
+*.tsbuildinfo
+*.local
+*.log
+
+# ---- Rust / Tauri (workspace 在 sisyphus/src-tauri 下) ----
+sisyphus/src-tauri/target/
+sisyphus/src-tauri/gen/schemas/
+# 注：gen/android 的构建产物（build/ .gradle/ .cxx 等）由 gen/android/.gitignore 处理；
+#     手写的 Kotlin 采集代码会被保留提交。
+
+# ---- Supabase ----
+services/ingest/supabase/.branches/
+services/ingest/supabase/.temp/
+
+# ---- Env / secrets ----
+**/.env
+**/.env.local
+
+# ---- 本机开发用 agent 配置（个人环境，不属于产品/交付物）----
+.claude/
+.mcp.json
+skills-lock.json
+.agents/
+.codex/
+
+# ---- 归档 / 弃用（不入库）----
+_deprecated/
+
+# ---- 散落的本地产物 ----
+/output/
+/tmp/

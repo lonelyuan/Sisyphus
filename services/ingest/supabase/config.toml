@@ -1,0 +1,24 @@
+# Supabase 本地开发配置（最小）。完整字段见官方默认模板。
+# 首次使用： supabase init 会生成完整版；此处仅保留关键项便于 supabase start。
+project_id = "sisyphus"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+major_version = 15
+
+[studio]
+enabled = true
+port = 54323
+
+[realtime]
+enabled = true
+
+[functions.ingest]
+verify_jwt = false

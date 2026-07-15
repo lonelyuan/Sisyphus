@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sisyphus.local/schema/behavior-event-1.0.json",
+  "title": "BehaviorEvent",
+  "description": "Sisyphus 事件协议 v1.0 统一信封。权威定义见 SPEC.md。",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "event_id",
+    "user_id",
+    "device_id",
+    "seq_no",
+    "source",
+    "layer",
+    "type",
+    "time_mode",
+    "payload",
+    "parent_event_ids",
+    "privacy_level",
+    "produced_at"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "event_id": { "type": "string", "format": "uuid" },
+    "user_id": { "type": "string" },
+    "device_id": { "type": "string" },
+    "seq_no": { "type": "integer", "minimum": 0 },
+    "source": {
+      "enum": [
+        "android_usage",
+        "android_accessibility",
+        "desktop_agent",
+        "browser_extension",
+        "engine",
+        "manual",
+        "agent"
+      ]
+    },
+    "layer": {
+      "enum": [
+        "raw",
+        "session",
+        "finding",
+        "decision",
+        "intervention",
+        "outcome",
+        "feedback"
+      ]
+    },
+    "type": { "type": "string" },
+    "time_mode": { "enum": ["point", "interval"] },
+    "event_time": { "type": "string", "format": "date-time" },
+    "start_time": { "type": "string", "format": "date-time" },
+    "end_time": { "type": ["string", "null"], "format": "date-time" },
+    "entity": { "type": ["string", "null"] },
+    "category": { "type": ["string", "null"] },
+    "payload": { "type": "object" },
+    "parent_event_ids": {
+      "type": "array",
+      "items": { "type": "string", "format": "uuid" }
+    },
+    "privacy_level": { "enum": ["L0", "L1", "L2", "L3"] },
+    "produced_at": { "type": "string", "format": "date-time" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "time_mode": { "const": "point" } } },
+      "then": { "required": ["event_time"] }
+    },
+    {
+      "if": { "properties": { "time_mode": { "const": "interval" } } },
+      "then": { "required": ["start_time"] }
+    }
+  ],
+  "additionalProperties": false
+}
