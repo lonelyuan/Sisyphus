@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Check, X, Plus, Bell, Clock, CircleCheck, Circle, Ban } from "lucide-react";
+import { Check, X, Plus, Bell, Clock, CircleCheck, Circle, Ban, CalendarClock } from "lucide-react";
 import { Card, CardLabel } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { fmtClock } from "@/lib/format";
+import { fmtClock, fmtDue, recurrenceLabel, actionLabel } from "@/lib/format";
 
 interface DailyGoal { id: string; date: string; raw_text: string; status: string }
 interface Task {
@@ -32,6 +32,14 @@ interface TodayContext {
   intervention_count: number;
   due_reminders: Reminder[];
 }
+interface ScheduledAction {
+  id: string;
+  kind: string;
+  payload_json: string;
+  due_at_ms: number;
+  recurrence: string | null;
+  status: string;
+}
 
 const GOAL_STATUS: Record<string, { label: string; className: string }> = {
   planned: { label: "计划中", className: "text-muted-foreground" },
@@ -44,18 +52,21 @@ const GOAL_STATUS: Record<string, { label: string; className: string }> = {
 export default function TodayScreen() {
   const [ctx, setCtx] = useState<TodayContext | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [scheduled, setScheduled] = useState<ScheduledAction[]>([]);
   const [goalInput, setGoalInput] = useState("");
   const [taskInput, setTaskInput] = useState("");
   const [saving, setSaving] = useState(false);
 
   async function load() {
     try {
-      const [c, t] = await Promise.all([
+      const [c, t, s] = await Promise.all([
         invoke<TodayContext>("get_today_context"),
         invoke<Task[]>("list_tasks"),
+        invoke<ScheduledAction[]>("list_scheduled_actions").catch(() => [] as ScheduledAction[]),
       ]);
       setCtx(c);
       setTasks(t);
+      setScheduled(s);
       if (c.goal && !goalInput) setGoalInput(c.goal.raw_text);
     } catch (e) {
       console.error("load today failed", e);
@@ -116,6 +127,7 @@ export default function TodayScreen() {
   const st = goal ? GOAL_STATUS[goal.status] ?? { label: goal.status, className: "text-muted-foreground" } : null;
   const goalOpen = goal ? goal.status === "planned" || goal.status === "started" : false;
   const openCount = tasks.filter((t) => t.status === "todo" || t.status === "doing").length;
+  const upcoming = [...scheduled].sort((a, b) => a.due_at_ms - b.due_at_ms);
 
   return (
     <div className="animate-in mx-auto flex max-w-md flex-col gap-3 p-4">
@@ -164,6 +176,31 @@ export default function TodayScreen() {
           <Stat value={`${openCount}`} label="待办" />
         </div>
       </Card>
+
+      {/* 主动计划：调度器即将执行的动作（知识自省 / 支线梳理 …） */}
+      {upcoming.length > 0 && (
+        <Card className="p-4">
+          <div className="flex items-center gap-2">
+            <CalendarClock size={14} strokeWidth={1.75} className="text-accent" />
+            <CardLabel>主动计划</CardLabel>
+          </div>
+          <ul className="mt-3 flex flex-col gap-2.5">
+            {upcoming.map((a) => {
+              const rec = recurrenceLabel(a.recurrence);
+              return (
+                <li key={a.id} className="flex items-center gap-2.5">
+                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent/70" />
+                  <div className="flex min-w-0 flex-1 flex-col">
+                    <span className="truncate text-sm leading-snug">{actionLabel(a.kind, a.payload_json)}</span>
+                    {rec && <span className="text-[11px] text-muted-foreground">{rec}</span>}
+                  </div>
+                  <span className="shrink-0 font-mono text-[11px] text-muted-foreground">{fmtDue(a.due_at_ms)}</span>
+                </li>
+              );
+            })}
+          </ul>
+        </Card>
+      )}
 
       {/* 任务（增删查改） */}
       <Card className="flex flex-col gap-3 p-4">

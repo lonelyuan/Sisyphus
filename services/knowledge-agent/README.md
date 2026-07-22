@@ -24,7 +24,7 @@ App 命令 run_knowledge_agent(topic)
 2. `npm install`（会一并装入依赖 `@openai/codex` CLI —— SDK 底层 spawn 它）。
 3. **codex 鉴权**：`codex login`（ChatGPT 登录）或设置 `CODEX_API_KEY`。
 4. **注册 sisyphus MCP**（让 Codex 能落库）：把 `sisyphus-mcp` 加进你的 `~/.codex/config.toml`，
-   见 [`skills/sisyphus-daily/SKILL.md`](../../skills/sisyphus-daily/SKILL.md)。未注册时脚本会退化为
+   见 [`skills/sisyphus/SKILL.md`](../../skills/sisyphus/SKILL.md)。未注册时脚本会退化为
    让 Codex 直接往 vault 目录写 `.md`（缺索引/溯源，仅应急）。
 
 ## 用法

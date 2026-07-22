@@ -99,12 +99,49 @@ pub struct WriteKnowledgeNoteReq {
     /// 来源 url / 引用
     #[serde(default)]
     pub sources: Vec<String>,
+    /// 可选分类子目录（话题领域），如 "web-security" 或 "work-mihoyo/state"；省略=vault 根。卡片落到 {folder}/{标题}.md
+    #[serde(default)]
+    pub folder: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SaveSourceReq {
+    /// 原文标题（决定文件名）
+    pub title: String,
+    /// 逐字原文内容（Markdown / 纯文本）
+    pub content: String,
+    /// 来源 URL（可选）
+    #[serde(default)]
+    pub url: Option<String>,
+    /// 素材类型（可选），如 article / vuln-report / doc / paper
+    #[serde(default)]
+    pub source_type: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SearchKnowledgeReq {
     /// 关键词（匹配标题 / 标签 / 路径）
     pub query: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DeleteNoteReq {
+    /// 要删除的卡片**标题**（优先精确匹配）或**相对路径**（如 kb/personal/x.md）
+    pub title: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AddMonitoredReq {
+    /// app 的 bundle id（macOS）或包名（Android），如 com.ss.android.ugc.aweme
+    pub id: String,
+    /// 分类：entertainment.video | entertainment.game | entertainment.social | entertainment.news
+    pub category: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RemoveMonitoredReq {
+    /// 要移除的 bundle id / 包名
+    pub id: String,
 }
 
 // ── Server ────────────────────────────────────────────────────────────────────
@@ -234,7 +271,7 @@ impl SisyphusServer {
     }
 
     #[tool(
-        description = "把一张加工好的知识卡片写入 Obsidian 知识库：生成 .md（frontmatter+正文+[[wikilink]]）+ 索引 + 溯源事件。同标题视为更新；不同标题若 slug 撞车则自动消歧防覆盖。返回 JSON {id,path,content_hash,updated}。"
+        description = "把一张加工好的知识卡片写入 Obsidian 知识库：生成 .md（frontmatter+正文+[[wikilink]]）+ 索引 + 溯源事件。folder 指定话题分类子目录（如 web-security、work-mihoyo/state），省略则落 vault 根。同标题视为更新；不同标题若 slug 撞车则自动消歧防覆盖。返回 JSON {id,path,content_hash,updated}。"
     )]
     fn write_knowledge_note(
         &self,
@@ -244,6 +281,7 @@ impl SisyphusServer {
             tags,
             links,
             sources,
+            folder,
         }): Parameters<WriteKnowledgeNoteReq>,
     ) -> Result<String, String> {
         let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
@@ -259,7 +297,34 @@ impl SisyphusServer {
             &self.vault_dir,
             &self.user_id,
             &self.device_id,
+            folder.as_deref(),
             &note,
+        )?;
+        serde_json::to_string(&out).map_err(|e| format!("序列化失败: {e}"))
+    }
+
+    #[tool(
+        description = "把值得原文保存的素材逐字归档到原始材料库 sources/（与知识图谱 kb/ 物理隔离，不进图谱、不导出博客）。返回 JSON {path,content_hash,updated}。加工总结请另用 write_knowledge_note 写 kb 卡片，并在其 sources 里引用本原文路径。"
+    )]
+    fn save_source(
+        &self,
+        Parameters(SaveSourceReq {
+            title,
+            content,
+            url,
+            source_type,
+        }): Parameters<SaveSourceReq>,
+    ) -> Result<String, String> {
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let out = sisyphus_core::sources::save_source(
+            &conn,
+            &self.vault_dir,
+            &self.user_id,
+            &self.device_id,
+            &title,
+            &content,
+            url.as_deref(),
+            source_type.as_deref(),
         )?;
         serde_json::to_string(&out).map_err(|e| format!("序列化失败: {e}"))
     }
@@ -280,6 +345,61 @@ impl SisyphusServer {
         let v = sisyphus_core::knowledge::list_knowledge(&conn).map_err(|e| e.to_string())?;
         serde_json::to_string_pretty(&v).map_err(|e| format!("序列化失败: {e}"))
     }
+
+    #[tool(
+        description = "从知识库删除一张卡片：移除 vault .md + 索引剪枝 + 溯源事件。**用于 defragment**——把多张碎卡合并进一颗结晶（用 write_knowledge_note 写合并后的卡）后，删掉冗余的旧碎卡；也用于 rebalance 的「并」。传标题（优先精确匹配）或相对路径。⚠️ 指向被删卡的 [[wikilink]] 需你另行 write_knowledge_note 改写到合并后的卡。幂等（不存在返回 deleted=false）。返回 JSON {path,deleted}。"
+    )]
+    fn delete_note(
+        &self,
+        Parameters(DeleteNoteReq { title }): Parameters<DeleteNoteReq>,
+    ) -> Result<String, String> {
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let out = sisyphus_core::knowledge::delete_knowledge_note(
+            &conn,
+            &self.vault_dir,
+            &self.user_id,
+            &self.device_id,
+            &title,
+        )?;
+        serde_json::to_string(&out).map_err(|e| format!("序列化失败: {e}"))
+    }
+
+    // ── 西西弗斯计划：监控名单（拖延干预）─────────────────────────────────────
+
+    #[tool(
+        description = "列出被视为娱乐/摸鱼的 app 监控名单（内置 + 用户自定义），返回 JSON。启动/调整拖延干预前先看它。"
+    )]
+    fn list_monitored_apps(&self) -> Result<String, String> {
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let v = sisyphus_core::category::list_monitored(&conn).map_err(|e| e.to_string())?;
+        serde_json::to_string_pretty(&v).map_err(|e| format!("序列化失败: {e}"))
+    }
+
+    #[tool(
+        description = "把一个 app 纳入监控（启动西西弗斯计划盯它）：当用户设了目标又超时刷它时会弹干预。id=bundle id/包名，category=entertainment.video|game|social|news。桌面+安卓即时生效。"
+    )]
+    fn add_monitored_app(
+        &self,
+        Parameters(AddMonitoredReq { id, category }): Parameters<AddMonitoredReq>,
+    ) -> Result<String, String> {
+        let id = id.trim();
+        if id.is_empty() {
+            return Err("id 不能为空".into());
+        }
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        sisyphus_core::category::add_monitored_app(&conn, id, &category).map_err(|e| e.to_string())?;
+        Ok(format!("monitoring: {id} -> {category}"))
+    }
+
+    #[tool(description = "从监控名单移除一个 app。")]
+    fn remove_monitored_app(
+        &self,
+        Parameters(RemoveMonitoredReq { id }): Parameters<RemoveMonitoredReq>,
+    ) -> Result<String, String> {
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        sisyphus_core::category::remove_monitored_app(&conn, &id).map_err(|e| e.to_string())?;
+        Ok("removed".to_string())
+    }
 }
 
 #[tool_handler]
@@ -297,7 +417,8 @@ impl ServerHandler for SisyphusServer {
                  propose_intents 对一条 capture 生成意图候选（你负责分类为 goal/task/reminder/note）→ \
                  accept_intent 落成 artifact（或 ignore_intent 忽略）。query_context 查今日上下文（目标/娱乐时长/未完成任务/到期提醒）；\
                  today_actions 取今日最小行动；set_goal 设今日目标。\
-                 第二大脑：ingest_document 收素材 → 你阅读加工 → write_knowledge_note 写概念卡片到 Obsidian 知识库（[[wikilink]] 关联）；search_knowledge/list_knowledge 检索。\
+                 第二大脑：ingest_document 收素材 → 你阅读加工 → write_knowledge_note 写概念卡片到 Obsidian 知识库（[[wikilink]] 关联）；search_knowledge/list_knowledge 检索；delete_note 删卡（合并碎卡后清冗余）。\
+                 西西弗斯计划（拖延干预）：add_monitored_app 把某娱乐 app 纳入监控 + set_goal 设目标，用户超时刷它时端侧自动弹干预；list_monitored_apps 查名单。\
                  语气：关心不评判、只提最小下一步、引用真实数据。"
                     .to_string(),
             ),

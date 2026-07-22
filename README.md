@@ -17,7 +17,7 @@ Sisyphus/
   sisyphus/    Tauri 客户端 = Rust workspace(app + core + mcp)+ React WebView UI（桌面 / 安卓）
   packages/    给「代码」用的共享库:protocol（事件协议唯一权威）、browser-extension（采集源，延后）
   services/    「部署运行」的服务端:ingest（Supabase，跨端同步 = Phase 2）
-  skills/      交付给「Agent 运行时」(Codex/Claude) 的技能包:sisyphus-daily
+  skills/      交付给「Agent 运行时」(Codex/Claude) 的技能包:sisyphus（一站式入口：意图路由 → 知识/任务提醒/习惯干预）
   docs/        规格（docs/spec/）与路线图
 ```
 
@@ -34,7 +34,7 @@ cd sisyphus/src-tauri && cargo build --release -p sisyphus-mcp
 ```
 
 - 客户端开发入门:[`docs/README.md`](docs/README.md)
-- MCP 安装与每日例程:[`skills/sisyphus-daily/SKILL.md`](skills/sisyphus-daily/SKILL.md)
+- 一站式入口 skill + MCP 安装:[`skills/sisyphus/SKILL.md`](skills/sisyphus/SKILL.md)（丢想法进去 → 识别意图 → 知识入库 / 任务提醒 / 启动西西弗斯计划）
 
 ## 文档
 

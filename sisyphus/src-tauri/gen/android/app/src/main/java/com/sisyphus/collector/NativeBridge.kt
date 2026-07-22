@@ -29,4 +29,7 @@ object NativeBridge {
 
     /** 诊断：返回 DB 路径/目标/事件数 的 JSON，用于排查「手机 0 记录」。 */
     external fun debugState(dbPath: String): String
+
+    /** 取出并标记到期提醒，返回 JSON 数组 [{"id","text"}] 供弹通知。 */
+    external fun fireDueReminders(dbPath: String): String
 }

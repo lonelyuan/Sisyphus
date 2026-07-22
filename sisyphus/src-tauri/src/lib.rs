@@ -1,6 +1,8 @@
 mod commands;
 #[cfg(target_os = "macos")]
 mod collector;
+#[cfg(desktop)]
+mod scheduler_runner;
 #[cfg(target_os = "android")]
 mod android_jni;
 
@@ -174,9 +176,12 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
             }
         });
 
-    if let Some(icon) = app.default_window_icon() {
-        builder = builder.icon(icon.clone());
-    }
+    // 菜单栏 / 系统托盘小图标：专用剪影（透明底）。icon_as_template=true → macOS 用其 alpha 形状
+    // 做遮罩，随亮/暗菜单栏自动反色（浅色栏显黑、深色栏显白），不再受"恒白在浅色栏看不清"之苦。
+    // Windows/Linux 无 template 概念，此标记被忽略，按白色剪影原样显示（深色任务栏正好显白）。
+    builder = builder
+        .icon(tauri::include_image!("icons/tray/tray-64.png"))
+        .icon_as_template(true);
     builder.build(app)?;
     Ok(())
 }
@@ -238,6 +243,12 @@ pub fn run() {
             sisyphus_core::category::ensure_starter_categories(&data_dir);
             let _ = sisyphus_core::category::import_overrides_to_table(&conn, &data_dir);
 
+            // 为主动触发 ticker 预留副本（vault_dir/db_path 稍后被 state/collector 移走）。
+            #[cfg(desktop)]
+            let sched_db = db_path.clone();
+            #[cfg(desktop)]
+            let sched_vault = vault_dir.clone();
+
             let state = AppState {
                 conn: Mutex::new(conn),
                 rule_engine: RuleEngine::new(RuleConfig::default()),
@@ -246,6 +257,13 @@ pub fn run() {
                 vault_dir,
             };
             app.manage(state);
+
+            // 反思平面主动触发：调度器 ticker 后台线程（proactive-triggers.md）。
+            #[cfg(desktop)]
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || scheduler_runner::run(sched_db, sched_vault, handle));
+            }
 
             // 感知平面：桌面前台采集器后台线程（独立连接，与 App 同库）。
             #[cfg(target_os = "macos")]
@@ -295,6 +313,7 @@ pub fn run() {
             commands::list_interventions,
             commands::list_sessions,
             commands::list_knowledge,
+            commands::list_scheduled_actions,
             commands::list_monitored_apps,
             commands::add_monitored_app,
             commands::remove_monitored_app,

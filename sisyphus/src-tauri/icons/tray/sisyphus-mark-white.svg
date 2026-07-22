@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <!-- 西西弗斯标记：巨石 + 斜坡（纯白剪影，透明底，供 dock/menubar/tray 小图标） -->
+  <!-- 斜坡：左低右高的实心山坡 -->
+  <path d="M12 112 L116 112 L116 52 Z" fill="#ffffff"/>
+  <!-- 巨石：切于坡面、与坡相连成一体剪影 -->
+  <circle cx="46" cy="72" r="22" fill="#ffffff"/>
+</svg>

@@ -30,6 +30,23 @@ class InterventionNotification(private val context: Context) {
         }
     }
 
+    /** 到点提醒（简单高优先通知，无干预按钮）。 */
+    fun showReminder(text: String) {
+        val notification = NotificationCompat.Builder(context, CHANNEL_INTERVENTION)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("⏰ 提醒")
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .build()
+        try {
+            NotificationManagerCompat.from(context).notify(3000 + (text.hashCode() and 0xffff), notification)
+        } catch (_: SecurityException) {
+            // POST_NOTIFICATIONS 未授权，静默失败
+        }
+    }
+
     fun buildCollectorNotification(): Notification =
         NotificationCompat.Builder(context, CHANNEL_COLLECTOR)
             .setSmallIcon(android.R.drawable.ic_dialog_info)

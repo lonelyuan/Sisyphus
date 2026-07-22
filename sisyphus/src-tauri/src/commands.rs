@@ -246,6 +246,16 @@ pub fn get_vault_path(state: State<'_, AppState>) -> String {
     state.vault_dir.to_string_lossy().to_string()
 }
 
+/// 主动触发：即将到来的待办动作（proactive-triggers.md）。供「今日 · 主动计划」展示
+/// 每日自省 / 支线梳理等排程；桌面端由调度器 ticker 播种，安卓暂无（返回空）。
+#[tauri::command]
+pub fn list_scheduled_actions(
+    state: State<'_, AppState>,
+) -> Result<Vec<sisyphus_core::scheduler::ScheduledAction>, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    sisyphus_core::scheduler::list_pending(&conn)
+}
+
 /// 第二大脑派发：调用 Codex TS SDK 的 Node 脚本，围绕 topic 深研并写入知识库。
 ///
 /// 脚本路径由 env `SISYPHUS_KNOWLEDGE_AGENT_SCRIPT` 指定（services/knowledge-agent/index.mjs 的

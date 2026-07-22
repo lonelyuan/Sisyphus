@@ -228,6 +228,27 @@ fn propose_batch_rejects_unknown_capture_and_bad_kind() {
 }
 
 #[test]
+fn due_reminders_fire_once() {
+    let conn = temp_db();
+    let cap = capture_text(&conn, "local-user", "test", "提醒").unwrap();
+    let past = now_ms() - 60_000;
+    let future = now_ms() + 3_600_000;
+    let ip = artifacts::insert_intent_candidate(&conn, &cap, "reminder", &json!({"text":"吃药","remind_at_ms":past}), 0.9, "agent").unwrap();
+    artifacts::accept_intent(&conn, &ip, None).unwrap();
+    let cf = capture_text(&conn, "local-user", "test", "开会").unwrap();
+    let ifu = artifacts::insert_intent_candidate(&conn, &cf, "reminder", &json!({"text":"开会","remind_at_ms":future}), 0.9, "agent").unwrap();
+    artifacts::accept_intent(&conn, &ifu, None).unwrap();
+
+    let fired = artifacts::take_due_reminders(&conn, now_ms()).unwrap();
+    assert_eq!(fired.len(), 1, "只触发已到期那条");
+    assert_eq!(fired[0].text, "吃药");
+    assert!(
+        artifacts::take_due_reminders(&conn, now_ms()).unwrap().is_empty(),
+        "已 fired 不重复触发"
+    );
+}
+
+#[test]
 fn context_surfaces_open_tasks_and_due_reminders() {
     let conn = temp_db();
 

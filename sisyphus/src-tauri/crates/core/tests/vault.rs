@@ -78,7 +78,7 @@ fn write_knowledge_note_creates_md_index_and_breadcrumb() {
     let dir = temp_vault();
     let conn = temp_db();
 
-    let out = knowledge::write_knowledge_note(&conn, &dir, "local-user", "test", &sample()).unwrap();
+    let out = knowledge::write_knowledge_note(&conn, &dir, "local-user", "test", None, &sample()).unwrap();
     assert!(!out.updated, "首次写应为新建");
     assert_eq!(out.path, "ai-安全.md");
     assert!(dir.join("ai-安全.md").exists(), ".md 应落到 vault");
@@ -106,7 +106,7 @@ fn write_knowledge_note_creates_md_index_and_breadcrumb() {
 
     // 再写同标题 → 更新、不新增行、hash 稳定
     let out2 =
-        knowledge::write_knowledge_note(&conn, &dir, "local-user", "test", &sample()).unwrap();
+        knowledge::write_knowledge_note(&conn, &dir, "local-user", "test", None, &sample()).unwrap();
     assert!(out2.updated, "同标题重写应为更新");
     assert_eq!(knowledge::list_knowledge(&conn).unwrap().len(), 1, "不应新增索引行");
     assert_eq!(out.content_hash, out2.content_hash);
@@ -136,8 +136,8 @@ fn distinct_titles_same_slug_do_not_clobber() {
         "前提：两个标题 slug 相同"
     );
 
-    let o1 = knowledge::write_knowledge_note(&conn, &dir, "local-user", "test", &n1).unwrap();
-    let o2 = knowledge::write_knowledge_note(&conn, &dir, "local-user", "test", &n2).unwrap();
+    let o1 = knowledge::write_knowledge_note(&conn, &dir, "local-user", "test", None, &n1).unwrap();
+    let o2 = knowledge::write_knowledge_note(&conn, &dir, "local-user", "test", None, &n2).unwrap();
     assert!(!o1.updated);
     assert!(!o2.updated, "不同标题应新建（消歧），而非覆盖式更新");
     assert_ne!(o1.path, o2.path, "两个不同标题必须落到不同文件");
@@ -150,8 +150,47 @@ fn distinct_titles_same_slug_do_not_clobber() {
     assert_eq!(knowledge::list_knowledge(&conn).unwrap().len(), 2, "两条独立知识都在");
 
     // 再写 n1 同标题 → 更新原文件，仍 2 行
-    let o1b = knowledge::write_knowledge_note(&conn, &dir, "local-user", "test", &n1).unwrap();
+    let o1b = knowledge::write_knowledge_note(&conn, &dir, "local-user", "test", None, &n1).unwrap();
     assert!(o1b.updated);
     assert_eq!(o1b.path, o1.path);
     assert_eq!(knowledge::list_knowledge(&conn).unwrap().len(), 2);
+}
+
+#[test]
+fn delete_knowledge_note_removes_md_and_prunes_index() {
+    let dir = temp_vault();
+    let conn = temp_db();
+
+    // 建两张卡（模拟碎片），合并 defragment 时删其一。
+    let out = knowledge::write_knowledge_note(&conn, &dir, "local-user", "test", None, &sample()).unwrap();
+    assert!(dir.join(&out.path).exists());
+    assert_eq!(knowledge::list_knowledge(&conn).unwrap().len(), 1);
+
+    // 按标题删
+    let del = knowledge::delete_knowledge_note(&conn, &dir, "local-user", "test", "AI 安全").unwrap();
+    assert!(del.deleted, "应找到并删除");
+    assert_eq!(del.path, out.path);
+    assert!(!dir.join(&out.path).exists(), "vault .md 应被移除");
+    assert!(
+        knowledge::list_knowledge(&conn).unwrap().is_empty(),
+        "剪枝后不应再列出"
+    );
+    assert!(
+        knowledge::search_knowledge(&conn, "安全").unwrap().is_empty(),
+        "剪枝后不应被检索到"
+    );
+
+    // 溯源：一条 knowledge_pruned
+    let cnt: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM raw_events WHERE type = 'knowledge_pruned'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(cnt, 1, "应有一条 knowledge_pruned 面包屑");
+
+    // 幂等：再删不存在的 → deleted=false，不报错
+    let again = knowledge::delete_knowledge_note(&conn, &dir, "local-user", "test", "AI 安全").unwrap();
+    assert!(!again.deleted, "已删/不存在应返回 deleted=false");
 }

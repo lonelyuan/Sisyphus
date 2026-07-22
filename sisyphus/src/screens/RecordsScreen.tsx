@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Activity, Bell, BookOpen, Circle } from "lucide-react";
 import { Card, CardLabel } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-import { fmtClock, fmtDay, fmtDuration, prettyApp, categoryLabel, isEntertainment } from "@/lib/format";
+import { fmtClock, fmtDay, fmtDuration, prettyApp, categoryLabel, isEntertainment, reliabilityClass } from "@/lib/format";
 
 interface SessionRow {
   entity: string | null;
@@ -147,20 +147,31 @@ export default function RecordsScreen() {
         </div>
         {knowledge.length ? (
           <ul className="mt-3 flex flex-col gap-2">
-            {knowledge.map((k) => (
-              <li key={k.id} className="flex flex-col gap-1">
-                <span className="text-sm">{k.title}</span>
-                {k.tags.length > 0 && (
-                  <div className="flex flex-wrap gap-1">
-                    {k.tags.map((t) => (
-                      <span key={t} className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                        #{t}
+            {knowledge.map((k) => {
+              const relTag = k.tags.find((t) => reliabilityClass(t));
+              const topicTags = k.tags.filter((t) => !reliabilityClass(t));
+              return (
+                <li key={k.id} className="flex flex-col gap-1">
+                  <div className="flex items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate text-sm">{k.title}</span>
+                    {relTag && (
+                      <span className={cn("shrink-0 rounded-full px-2 py-0.5 text-[10px]", reliabilityClass(relTag))}>
+                        {relTag}
                       </span>
-                    ))}
+                    )}
                   </div>
-                )}
-              </li>
-            ))}
+                  {topicTags.length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {topicTags.map((t) => (
+                        <span key={t} className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                          #{t}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         ) : (
           <Empty text="知识库为空。让 Codex 用 write_knowledge_note 写卡片，或在设置里打开 vault。" />

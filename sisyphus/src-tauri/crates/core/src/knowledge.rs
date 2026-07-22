@@ -18,6 +18,16 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// 把文件名放进可选分类子目录：`Some("a/b")` → `a/b/{filename}`；None/空 → `{filename}`。
+fn in_folder(folder: Option<&str>, filename: &str) -> String {
+    match folder {
+        Some(f) if !f.trim().trim_matches('/').is_empty() => {
+            format!("{}/{}", f.trim().trim_matches('/'), filename)
+        }
+        _ => filename.to_string(),
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct KnowledgeNote {
     pub id: String,
@@ -42,6 +52,9 @@ pub struct WriteOutcome {
 
 /// 写一张知识卡片（vault + 索引 + 溯源事件）。返回 id / 相对路径 / 内容哈希。
 ///
+/// `folder`：可选分类子目录（如 `web-security` 或 `work-mihoyo/state`）；None = vault 根。
+/// 卡片落到 `{folder}/{slug}.md`，`[[wikilink]]` 按标题解析、与路径无关，故重排移动不断链。
+///
 /// 防覆盖：不同标题 slug 相同（如「Rust: 所有权」与「Rust 所有权」）时，若默认路径已被
 /// **另一个标题**占用，则消歧到 `{slug}-{标题哈希}.md`，避免静默覆盖 + 丢溯源。
 pub fn write_knowledge_note(
@@ -49,12 +62,13 @@ pub fn write_knowledge_note(
     vault_dir: &Path,
     user_id: &str,
     device_id: &str,
+    folder: Option<&str>,
     note: &VaultNote,
 ) -> Result<WriteOutcome, String> {
     let now = now_ms();
 
-    // 1. 选路径：默认 slug；若撞到不同标题则消歧。
-    let mut rel = vault::note_path(&note.title);
+    // 1. 选路径：默认 slug（在 folder 下）；若撞到不同标题则消歧。
+    let mut rel = in_folder(folder, &vault::note_path(&note.title));
     let occupant: Option<(String, String, i64)> = conn
         .query_row(
             "SELECT id, title, created_at FROM knowledge_notes WHERE path = ?1",
@@ -69,7 +83,7 @@ pub fn write_knowledge_note(
         Some(_) => {
             let base = vault::slugify(&note.title);
             let suffix = &vault::content_hash(&note.title)[..6];
-            rel = format!("{base}-{suffix}.md");
+            rel = in_folder(folder, &format!("{base}-{suffix}.md"));
             match conn
                 .query_row(
                     "SELECT id, created_at FROM knowledge_notes WHERE path = ?1",
@@ -140,6 +154,91 @@ pub fn write_knowledge_note(
         path: res.relative_path,
         content_hash: res.content_hash,
         updated,
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeleteOutcome {
+    pub path: String,
+    /// true = 找到并删除；false = 本就不存在（幂等）。
+    pub deleted: bool,
+}
+
+/// 删除一张知识卡片：移除 vault `.md` + 索引软删（status='pruned'）+ 溯源事件。
+///
+/// `key` 可传**标题**（优先精确匹配索引）或**相对路径**（`kb/…/x.md`）。
+/// 用于 **defragment**（把碎卡合并进一颗结晶后删冗余）与 rebalance 的「并」操作。
+/// ⚠️ 指向被删卡的 `[[wikilink]]` 由调用方另行改写到合并后的卡——本函数不动其它文件。
+/// 幂等：目标不存在时返回 `deleted=false`，不报错。
+pub fn delete_knowledge_note(
+    conn: &Connection,
+    vault_dir: &Path,
+    user_id: &str,
+    device_id: &str,
+    key: &str,
+) -> Result<DeleteOutcome, String> {
+    // 1. 定位索引行：先按 title 精确匹配，其次按 path。
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT id, path FROM knowledge_notes WHERE title = ?1 AND status != 'pruned'",
+            params![key],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .or_else(|_| {
+            conn.query_row(
+                "SELECT id, path FROM knowledge_notes WHERE path = ?1 AND status != 'pruned'",
+                params![key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .ok();
+
+    let (id, rel) = match row {
+        Some(v) => v,
+        None => {
+            return Ok(DeleteOutcome {
+                path: key.to_string(),
+                deleted: false,
+            })
+        }
+    };
+
+    // 2. 移除 vault .md（文件已不在也不报错，索引仍要剪枝）。
+    let abs = vault_dir.join(&rel);
+    if abs.exists() {
+        std::fs::remove_file(&abs).map_err(|e| format!("删 vault 文件失败: {e}"))?;
+    }
+
+    // 3. 软删索引行（list/search 已过滤 status='pruned'）。
+    let now = now_ms();
+    conn.execute(
+        "UPDATE knowledge_notes SET status='pruned', updated_at=?2 WHERE id=?1",
+        params![id, now],
+    )
+    .map_err(|e| format!("剪枝索引失败: {e}"))?;
+
+    // 4. 溯源面包屑：knowledge_pruned（进统一事件流，可回溯为何删）。
+    let breadcrumb = crate::ingest::NewEvent {
+        event_id: None,
+        source: "agent".into(),
+        layer: "raw".into(),
+        event_type: "knowledge_pruned".into(),
+        time_mode: "point".into(),
+        event_time: Some(now),
+        start_time: None,
+        end_time: None,
+        entity: None,
+        category: None,
+        payload: serde_json::json!({ "path": rel, "key": key }),
+        parent_event_ids: vec![],
+        privacy_level: "L1".into(),
+    };
+    crate::ingest::ingest_event(conn, user_id, device_id, breadcrumb)
+        .map_err(|e| format!("写溯源事件失败: {e}"))?;
+
+    Ok(DeleteOutcome {
+        path: rel,
+        deleted: true,
     })
 }
 

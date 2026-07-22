@@ -342,4 +342,23 @@ CREATE TABLE IF NOT EXISTS monitored_apps (
     category   TEXT NOT NULL,             -- entertainment.video|game|social|news
     created_at INTEGER NOT NULL
 );
+
+-- ── 主动触发：待办动作队列（proactive-triggers.md §2）───────────────────────
+-- 统一"到点要做的动作"：时间触发的周期任务、规则引擎的立即/延后响应、agent 排程都塞这里。
+-- due_at_ms=now 即"立即"；=now+Δ 即"延后"。core 只管队列增删查（纯数据、安卓可编）；
+-- 副作用（弹通知/拉 codex/回写 Notion）由 app 层按 kind 派发。
+CREATE TABLE IF NOT EXISTS scheduled_actions (
+    id              TEXT PRIMARY KEY,
+    kind            TEXT NOT NULL,               -- notify|agent_run|notion_now|notion_inbox|…
+    payload_json    TEXT NOT NULL DEFAULT '{}',
+    due_at_ms       INTEGER NOT NULL,
+    recurrence      TEXT,                        -- NULL=一次性；如 "daily@09:00"
+    status          TEXT NOT NULL DEFAULT 'pending', -- pending|fired|done|failed|cancelled
+    dedup_key       TEXT,                        -- 同 key 已有 pending 则不重复入队（防打扰）
+    origin_event_id TEXT,                        -- 溯源：触发它的 finding/事件
+    created_by      TEXT NOT NULL,               -- rule_engine|scheduler|agent|manual
+    created_at_ms   INTEGER NOT NULL,
+    fired_at_ms     INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_sched_due ON scheduled_actions (status, due_at_ms);
 "#;

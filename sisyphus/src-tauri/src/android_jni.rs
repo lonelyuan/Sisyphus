@@ -195,3 +195,28 @@ pub extern "system" fn Java_com_sisyphus_collector_NativeBridge_debugState<'loca
         .map(|j| j.into_raw())
         .unwrap_or(std::ptr::null_mut())
 }
+
+/// 取出并标记到期提醒，返回 JSON 数组 `[{"id","text"}]` 供 Kotlin 弹通知。绝不 panic。
+#[no_mangle]
+pub extern "system" fn Java_com_sisyphus_collector_NativeBridge_fireDueReminders<'local>(
+    mut env: JNIEnv<'local>,
+    _this: JObject<'local>,
+    db_path: JString<'local>,
+) -> jstring {
+    let json = (|| -> Option<String> {
+        let db_path = jstr(&mut env, &db_path)?;
+        let conn = open_conn(&db_path)?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let due = sisyphus_core::artifacts::take_due_reminders(&conn, now).ok()?;
+        let arr: Vec<serde_json::Value> = due
+            .iter()
+            .map(|r| serde_json::json!({ "id": r.id, "text": r.text }))
+            .collect();
+        serde_json::to_string(&arr).ok()
+    })()
+    .unwrap_or_else(|| "[]".to_string());
+
+    env.new_string(json)
+        .map(|j| j.into_raw())
+        .unwrap_or(std::ptr::null_mut())
+}

@@ -14,8 +14,10 @@ pub mod category;
 pub mod artifacts;
 pub mod vault;
 pub mod knowledge;
+pub mod sources;
 pub mod intervention;
 pub mod timeline;
+pub mod scheduler;
 
 pub use ingest::{ingest_event, capture_text, NewEvent};
 pub use rule_engine::{DailyGoal, Finding, RuleContext, RuleEngine};

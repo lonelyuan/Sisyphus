@@ -1,6 +1,6 @@
 # Spec: 总体架构
 
-本文件是西西弗斯的**架构权威文档**。其他 spec（protocol / local-storage / rule-engine / agent / sync / android-collection）都是本文件某一部分的展开。改动架构时先改本文件。
+本文件是西西弗斯的**架构权威文档**。其他 spec（protocol / local-storage / rule-engine / agent / sync / android-collection / notion-integration / proactive-triggers / api）都是本文件某一部分的展开。改动架构时先改本文件。
 
 ---
 
@@ -21,6 +21,19 @@
 
 1. **业务模块（拖延干预 / 原声笔记 / 第二大脑）不是三个 App**，而是"**采集源 + 规则包 + 视图**"三种配方，跑在同一套 Core 上。
 2. **Core 不是 `capture/intent/artifact` 那套对象模型**——那只是"手动输入"这一个源的私有数据。Core 是 SIEM：信封 + 事件存储 + 引擎 + 响应 + 唯一接入契约。
+
+---
+
+## 0.5 产品组件视图：一个总入口 + 三大模块
+
+§0 的 SOC / 两平面是**技术地基**；面向用户，系统组织为**一个总入口 + 三大模块**，全部跑在同一 Core 上（见 §1–§4）：
+
+- **InputBox（无压力记录）—— 总入口**：兼容跨端输入源（Codex、Notion，后续加西西弗斯 APP 本地输入），把任意一句话原样接住（`capture`）。经**意图识别智能体**（现为 Codex/Claude runtime，后期自建 Agent 底座）做**功能路由**，调对应模块。
+- **模块一 · 狭义西西弗斯（习惯培养 / 对抗拖延）**：采集端 → 行为日志库 → 习惯引擎（规则 / ML）→ 提醒干预端。项目最早的闭环，即感知平面。
+- **模块二 · LifeIndex（人生看板）**：记录短期 Todo、长期目标、个人发展、知识体系、研究问题等一切内容；作为**人与智能体共享的上下文**，与其他模块联动，"看一眼就知道下一步该干什么"。真相在 Notion，见 [notion-integration.md](notion-integration.md)。
+- **模块三 · 第二大脑（知识库 / 知识图谱）**：以 Markdown vault 为存储介质，配调研 / 验证 / 梳理智能体构建个人知识库；后续可派生知识图谱（图数据库）。
+
+> InputBox / 意图识别 / 三模块是**产品组件视图**，不改变 §2 的双存储与 §3 的 `ingest_event` 唯一契约：InputBox = `capture`，意图识别 = `propose_intents`，模块产物落 Artifact store 或 vault。**被动采集不经 InputBox**，直接进狭义西西弗斯（感知平面）。
 
 ---
 
@@ -132,7 +145,7 @@ App 侧把数据层能力以 **MCP 工具** 暴露给 Agent（先挂 Codex / Cla
 - 位置：`sisyphus/src-tauri/crates/mcp`（bin `sisyphus-mcp`）。
 - 由 Codex/Claude Code 作为子进程 stdio 拉起；打开与 App 同一个 `sisyphus.db`（WAL + `busy_timeout` 支持跨进程并发），**App 未运行也能工作**。
 - 已实现工具：`capture` / `query_context` / `today_actions` / `set_goal`（MVP，未提前造 intent/artifact 工具）。
-- **交付物,不接进本开发仓库**:用户侧把 `sisyphus-mcp` 注册进自己的 Codex/Claude,并配合 skill `skills/sisyphus-daily/`(内含安装与每日规划/复盘例程 + 定时任务模板)。本 dev 仓库的 `.codex/config.toml` 只保留开发用的 supabase MCP。
+- **交付物,不接进本开发仓库**:用户侧把 `sisyphus-mcp` 注册进自己的 Codex/Claude,并配合 skill `skills/sisyphus/`(内含安装与每日规划/复盘例程 + 定时任务模板)。本 dev 仓库的 `.codex/config.toml` 只保留开发用的 supabase MCP。
 
 ---
 
@@ -157,7 +170,7 @@ App 侧把数据层能力以 **MCP 工具** 暴露给 Agent（先挂 Codex / Cla
 | `sisyphus/` | 终端用户（桌面/安卓）| Tauri 客户端 = Rust workspace（app + core + mcp）+ Web UI |
 | `packages/` | **代码**（被 import / 装载）| 共享库与可分发件：`protocol`(npm 类型包)、`browser-extension` |
 | `services/` | 部署运行 | 服务端：`ingest`(Supabase) |
-| `skills/` | **Agent 运行时**（Codex/Claude）| 交付给用户装进 LLM 的技能包：`sisyphus-daily` |
+| `skills/` | **Agent 运行时**（Codex/Claude）| 交付给用户装进 LLM 的技能包：`sisyphus` |
 | `docs/` | 人 | 规格与路线图 |
 
 > skill 单列顶层是合理的：它的消费者是 agent 运行时、格式是 SKILL.md 包，和 `packages/`(给代码)、`services/`(部署)、`sisyphus/`(客户端)都不同；且反思平面后续会有更多 skill。
@@ -183,9 +196,46 @@ Android 采集源以 Kotlin Tauri 插件形式接入 `sisyphus/`，见 [android-
 - 已验证：Tauri v2 能在 Mac 上编译桌面端与 Android 包。
 - 数据层/引擎：`BehaviorEvent` 信封、Event log(`raw_events`)/`outbox`/`daily_goals`/`interventions`、`Rule` trait、`EntertainmentSessionRule` 均已抽入 `sisyphus-core`。
 - 写入契约：`ingest_event` + `capture_text` 已落地（core），App 命令与 MCP 共用。
-- 反思平面:`sisyphus-mcp`(rmcp stdio)已实现并端到端冒烟通过(capture/query_context/today_actions/set_goal 真实读写同库);作为交付物,用户侧接入,配套 skill `skills/sisyphus-daily/` 已建。
+- 反思平面:`sisyphus-mcp`(rmcp stdio)已实现并端到端冒烟通过(capture/query_context/today_actions/set_goal 真实读写同库);作为交付物,用户侧接入,配套 skill `skills/sisyphus/` 已建。
 - 感知平面(B 轨第一根真实电线):macOS 前台采集器已落地(`sisyphus/src-tauri/src/collector.rs`,后台线程 osascript 轮询→分类→`ingest_event` 写 `app_foreground`→规则引擎→桌面通知 via tauri-plugin-notification)。规则管道有集成测试(`crates/core/tests/rule_pipeline.rs`,3 通过);osascript 前台探测已验证可用。
 - **待真机验证**:`npm run tauri dev` 跑起来后,设目标 + 停留在娱乐类 app 一分钟(debug 阈值),确认弹真通知——即验证核心假设。桌面分类白名单在 `crates/core/src/category.rs`(看 collector 打到 stderr 的 bundle id 自行增补)。
 - 技术栈：Tauri v2（Rust + React/TS）、rusqlite（本地）、rmcp（MCP server）、tauri-plugin-notification（桌面通知）、Codex/Claude Code（反思平面基座，现阶段）、Supabase/Postgres（同步，Phase 2）。
 
 开发路径见 [../roadmap.md](../roadmap.md)「近期推荐下一步」。
+
+---
+
+## 8. 开发计划与可拓展边界（敏捷 · 复用 · 留迁移门）
+
+总原则：**敏捷开发、充分复用现成工具，但在架构上保留后续换成自研的可拓展性。**
+
+1. **智能体基座可换**：现阶段用 Codex / Claude Code 作基座，智能体能力一律沉淀为 **skill / MCP / CLI / SDK**；通用智能体亦作前期主入口。后期整体替换为自研 Agent 底座——**换脸不换脊椎**（Core 经 MCP 暴露，见 §4）。
+2. **自建存储 + 生态接入并存**：自建存储架构（SQLite：Event log + Artifact store）是事实边界；同时保持与常用软件生态互通——充分用 **Notion MCP** 保留 Notion 使用习惯（见 [notion-integration.md](notion-integration.md)）；知识库用 **Obsidian Markdown vault**，后续可派生知识图谱（图数据库）。
+3. **先验证，再"真正用起来"**：先验证前期架构可行性，通过后再追求日常可用性与产品形状。
+
+**长期规划暂缓（明确克制，验证期不碰）：**
+
+| 模块 | 暂缓项 |
+|---|---|
+| 狭义西西弗斯 | IoT / 可穿戴端采集、跨端同步、RL 跨端学习 |
+| LifeIndex | 无极时间线、技能树（LifeIndex 自建前端） |
+| 第二大脑 | 知识图谱（图数据库）派生 |
+
+---
+
+## 9. 主动触发：调度器 + 动作队列 + Agent 派发
+
+系统不止"被动响应输入"，还要**主动**：每日定时自省知识库、下班时挑一件支线提醒、规则引擎检出行为特征后择时干预。这些统一到**一条"待办动作队列"**，不是散落的 cron。
+
+**核心抽象**：一条 `scheduled_actions` 队列，多个生产者塞"在时刻 T 做动作 A"，一个常驻循环到点派发。`T=now` 即"立即"，`T=now+Δ` 即"延后"——**同一条路径**。这满足关键可拓展性：规则引擎检出特征后，响应策略既可"立即提醒"也可"延后提醒"，只是 `due_at` 不同；每日定时任务只是带 `recurrence` 的一条。
+
+**分层守铁律**：
+- **`sisyphus-core::scheduler`**：队列纯数据逻辑（enqueue / due_actions / mark_fired / reschedule），纯 rusqlite、无副作用，安卓可编。
+- **app（感知平面常驻）**：ticker 到点取 `due_actions` → 按 `kind` 执行**平台相关副作用**（`notify` 弹通知 / `agent_run` 拉起 codex / `notion_*` 白名单回写）。`tokio`/进程/通知**绝不进 core**。
+- **规则引擎 → 响应规划器**：finding → `ResponsePolicy`(Immediate/Deferred/Debounce/Suppress) → `core::enqueue_action`。这是"立即 vs 延后 vs 防打扰"的可拓展 seam。
+
+**"何时触发"是确定性的活（在 app/引擎），"做什么/要不要打扰"才是 agent 的判断**——别把判断塞进调度器（呼应 §1.1）。
+
+**打通 app→知识库→Notion**：主动队列是**触发器**，跨模块数据一致靠**投影管道**（`outbox` → projectors：知识→Obsidian、LifeIndex→Notion 白名单）。各模块真相源不同（Core=事件/artifact、Obsidian=知识散文、Notion=看板），各自幂等投影，不合一。典型串联：19:00 `agent_run` 读目标+知识缺口→挑支线→写 reminder→`notion_now` 刷 NOW 挂件 + `notify` 端侧。
+
+完整数据模型、响应策略、执行器、可靠性与 MVP 边界见 [proactive-triggers.md](proactive-triggers.md)。

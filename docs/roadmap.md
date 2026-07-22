@@ -14,6 +14,26 @@
 
 ---
 
+## 进度快照（2026-07-15）
+
+Phase 0 / 1.0 / 1.1 / 1.2 / 1.3 的核心闭环均已落地并在本机跑通（Tauri v2 + Rust `sisyphus-core` + rmcp MCP + React/Tailwind 深色 UI）。逐项状态见各阶段勾选框。
+
+| 阶段 | 状态 | 一句话 |
+|---|---|---|
+| Phase 0 技术验证 | ✅（同步除外） | Tauri/SQLite/协议/`ingest_event`/MCP 全通；Supabase 同步延后至 Phase 2 |
+| 1.0 Core MVP | ✅ | capture→propose_intents→accept_intent→artifact；per-type 表 + `intent_candidates` 审计 |
+| 1.1 拖延干预 | ✅ 闭环 / ⏳ 真机验证 | macOS 采集器 + Android UsageStats(JNI，后台可弹) + 规则 + 通知 + 反馈；缺 outcome 观察、LLM 文案 |
+| 1.2 原声笔记 | ✅ | 收件箱 → Codex 分类 → accept/edit/ignore 落 artifact；不自建 UI，走 Codex |
+| 1.3 第二大脑 | ✅ 核心 | Obsidian vault(.md+`[[wikilink]]`) + `knowledge_notes` 索引 + Codex TS SDK 派发；缺关系判定/剪枝 |
+
+**超出原 MVP 的额外落地**：感知平面 App 常驻（tray / 关窗不退 / 开机自启）、Codex 风深色 UI（今日 / 记录 / 设置 三页 + 目标·任务 CRUD）、监控名单跨端增删查改、Android 端可编译运行。
+
+**当前主线（2026-07-20 调整）**：Notion 集成（LifeIndex 双向流）+ 主动引擎。见 [spec/notion-integration.md](spec/notion-integration.md) 与文末「近期推荐下一步」。
+
+> **kill-criteria 已废弃（2026-07-20 用户决定）**：原以"连续 5 天通知未改变行为→证明无效"当 kill 门。用户判断该门逻辑上无法证伪（永远可归因于"实现不够好"），既不能证伪 idea、反而拖着不敢往下做。故不再当验证门槛，改当**持续打磨的实现质量问题**。"通知/主动提醒能改变行为"作为项目公理，实现形态（通知/NOW 挂件/遮罩/对话）持续迭代。
+
+---
+
 ## 总体架构心智模型
 
 西西弗斯从两个维度组织。
@@ -34,9 +54,10 @@
 
 | 模块 | 目标 | 核心闭环 |
 |---|---|---|
+| 总入口 · InputBox + 意图识别（原 1.2 原声笔记） | 无压记录 + 功能路由 | 任意输入 → `capture` → 意图识别 → 路由到下面三模块 |
 | 1.1 西西弗斯计划（狭义） | 低效习惯与拖延的数字干预 | 行为采集 → 风险识别 → Agent 干预 → 用户反馈 → 近端结果 |
-| 1.2 原声笔记 | 无压记录的个人助理 | 任意输入 → 意图提取 → 结构化落盘 → 最小行动/提醒 |
-| 1.3 第二大脑 | 和人一同进化的知识工程 | 原始材料/目标 → 学习加工 → 知识图谱/知识库 → 可读输出/教学 |
+| LifeIndex · 人生看板 | 人与智能体共享的上下文，一眼知下一步 | Notion(真相) ↔ 本地索引 → 主动引擎挑时机提醒（见 [spec/notion-integration.md](spec/notion-integration.md)） |
+| 1.3 第二大脑 | 和人一同进化的知识工程 | 原始材料/目标 → 学习加工 → 知识库(vault)/知识图谱 → 可读输出/教学 |
 
 ### 统一入口
 
@@ -85,13 +106,13 @@
 
 验收标准：
 
-- [ ] Tauri Desktop / Android 基础工程可运行，能调用 Rust command。
-- [ ] 本地 SQLite schema 初始化、读写、迁移机制可验证。
-- [ ] append-only `raw_events` + outbox 模式可跑通。
-- [ ] Supabase/Postgres 能接收批量事件，保持幂等写入。
-- [ ] 端侧事件协议、服务端 schema、TypeScript 类型保持一致。
-- [ ] 基础隐私等级模型存在：L0/L1 默认，L2/L3 明确授权。
-- [ ] Agent 调用与业务逻辑解耦：Agent 只能通过 CLI/SDK/API 调用 Sisyphus Core。
+- [x] Tauri Desktop / Android 基础工程可运行，能调用 Rust command。
+- [x] 本地 SQLite schema 初始化、读写、迁移机制可验证。（`CREATE TABLE IF NOT EXISTS` 增量演进）
+- [x] append-only `raw_events` + outbox 模式可跑通。
+- [ ] Supabase/Postgres 能接收批量事件，保持幂等写入。（**延后 Phase 2**：outbox 已排队，未接上传）
+- [x] 端侧事件协议、服务端 schema、TypeScript 类型保持一致。（`SPEC.md` ↔ `events.ts`；Supabase schema 待同步时校准）
+- [x] 基础隐私等级模型存在：L0/L1 默认，L2/L3 明确授权。（`privacy_level` 字段，采集只产 L0–L1）
+- [x] Agent 调用与业务逻辑解耦：Agent 只能通过 MCP 调用 Sisyphus Core。
 
 里程碑：
 
@@ -118,14 +139,16 @@
 - `reminders` / `interventions`：提醒和干预。
 - `feedback_events` / `outcomes`：用户反馈和近端结果。
 
+> **实现校准**：最终未造多态大表 `artifacts`，改为**每种对象各自建表**（`daily_goals`/`tasks`/`notes`/`reminders`/`knowledge_notes`）；capture 不单列 `capture_items`，而是 Event log 里的 `note_text` 事件；`artifact_relations` 未提前造（1.3 知识关系用 vault `[[wikilink]]`）。见 [spec/architecture.md](spec/architecture.md) §2。
+
 验收标准：
 
-- [ ] `capture(text)` 能保存任意自然语言输入。
-- [ ] `propose_intents(capture_id)` 能输出结构化候选意图。
-- [ ] `accept_intent(intent_id)` 能创建或更新 artifact。
-- [ ] `select_today_actions()` 能从多个目标中选出 1–3 个今日最小行动。
-- [ ] 所有 AI 推断有来源、置信度和可回滚状态。
-- [ ] Core 暴露 CLI/SDK 接口，供 Codex skill、Pi runtime 或自研 UI 调用。
+- [x] `capture(text)` 能保存任意自然语言输入。
+- [x] `propose_intents(capture_id)` 能输出结构化候选意图。（Codex 生成、MCP 持久化）
+- [x] `accept_intent(intent_id)` 能创建或更新 artifact。（含 `edits` 修改、`ignore` 回滚）
+- [x] `select_today_actions()` 能选出 1–3 个今日最小行动。（`today_actions`：目标 + 未完成任务）
+- [x] 所有 AI 推断有来源、置信度和可回滚状态。（`intent_candidates`：capture_event_id/confidence/status）
+- [x] Core 暴露 SDK 接口，供 Codex skill / 自研 UI 调用。（rmcp MCP + App 命令 + Codex TS SDK 派发）
 
 ### Phase 1.1 — 西西弗斯计划（狭义）：拖延与低效习惯干预
 
@@ -153,11 +176,11 @@ MVP 范围：
 
 验收标准：
 
-- [ ] 手机端刷 B 站/抖音超过阈值时，能基于今日目标触发提醒。
-- [ ] 用户点击反馈后写入本地数据库和 outbox。
-- [ ] 系统能观察提醒后 10/30/60 分钟近端结果。
-- [ ] Agent 能生成不羞辱、不说教、引用实际上下文的提醒文案。
-- [ ] 规则和策略分离：规则只识别机会，策略决定是否提醒和如何提醒。
+- [x] 手机端刷 B 站/抖音超过阈值时，能基于今日目标触发提醒。（Android UsageStats→JNI→规则→Kotlin 通知，后台可弹；⏳ 真机连续验证中）
+- [x] 用户点击反馈后写入本地数据库和 outbox。（通知按钮→`record_feedback`；事件入 outbox）
+- [ ] 系统能观察提醒后 10/30/60 分钟近端结果。（**未做**：`interventions.outcome` 列已留，回填逻辑待写）
+- [~] Agent 能生成不羞辱、不说教、引用实际上下文的提醒文案。（现为**确定性模板**：引用真实时长+目标、不羞辱；LLM 生成待做）
+- [~] 规则和策略分离：规则只识别机会，策略决定是否提醒和如何提醒。（规则识别✓；策略层仅冷却，contextual bandit 属 Phase 2.1）
 
 ### Phase 1.2 — 原声笔记：无压记录的个人助手
 
@@ -184,11 +207,11 @@ MVP 范围：
 
 验收标准：
 
-- [ ] 输入一句自然语言后，系统能判断是目标、任务、提醒、材料、偏好、情绪还是反馈。
-- [ ] 系统只提出最小下一步，不生成任务海。
-- [ ] 用户可一键接受、修改、忽略。
-- [ ] 今日页只展示 1–3 个最小行动。
-- [ ] 已接受意图能被提醒、复盘和后续对话引用。
+- [x] 输入一句自然语言后，系统能判断是目标、任务、提醒、材料、偏好、情绪还是反馈。（Codex 分类为 goal/task/reminder/note；情绪→打标 note，材料→知识库，反馈→事件）
+- [x] 系统只提出最小下一步，不生成任务海。（`SKILL.md` 明确「只提最小候选」）
+- [x] 用户可一键接受、修改、忽略。（`accept_intent` / `accept_intent(edits)` / `ignore_intent`）
+- [x] 今日页只展示 1–3 个最小行动。（`today_actions` 上限 3）
+- [x] 已接受意图能被提醒、复盘和后续对话引用。（`query_context` 含未完成任务 + 到期提醒）
 
 ### Phase 1.3 — 第二大脑：和人一同进化的知识工程
 
@@ -216,11 +239,11 @@ MVP 范围：
 
 验收标准：
 
-- [ ] 输入一篇文章或链接，系统能生成 5 行以内摘要和 3–10 个概念节点。
-- [ ] 系统能判断材料与已有节点的关系，例如 AI Infra 与 AI Security 共享 AI 根节点。
-- [ ] 用户能纠正分类和关系。
-- [ ] 知识节点能被后续对话、今日行动、学习计划引用。
-- [ ] 系统能标记过期、重复、低价值节点，进入剪枝候选。
+- [x] 输入一篇文章或链接，系统能生成 5 行以内摘要和 3–10 个概念节点。（Codex + `write_knowledge_note`；已真机写出「游泳知识库」5 张卡片）
+- [~] 系统能判断材料与已有节点的关系。（关系靠 Codex 写 `[[wikilink]]`；无自动关系判定/合并/共享根节点推断）
+- [~] 用户能纠正分类和关系。（`.md` 可直接在 Obsidian 编辑；App 内知识列表暂只读）
+- [x] 知识节点能被后续对话、今日行动、学习计划引用。（`search_knowledge` / `list_knowledge` + query）
+- [ ] 系统能标记过期、重复、低价值节点，进入剪枝候选。（**未做**：`status` 列已留 stale/duplicate/pruned，判定逻辑待写）
 
 ---
 
@@ -283,30 +306,29 @@ MVP 范围：
 
 ## 近期推荐下一步
 
-架构已定（[spec/architecture.md](spec/architecture.md)）。当前系统的真实缺口不是 Core，而是**没有任何采集源向 Event log 写真实数据，引擎在查空表**。所以近期只有一个主线：**给 SIEM 接上第一根真实的电线，端到端跑通一次。**
+三条轨道——A 反思平面、B 感知平面（macOS 采集器）、跨端安卓（UsageStats→JNI 后台闭环）——都已跑通。**Core、采集、干预、UI 都不再是瓶颈**。当前主线转向**让西西弗斯丝滑融入用户既有的 Notion 生态**，并把感知平面的闲暇检测接成"主动提醒下一步"。
 
-分两条互不依赖代码的轨道，二者只在同一个 SQLite 相遇，可任选其一先做（WIP=1，一次只推一条）：
+### 主线：Notion 集成（LifeIndex 双向流）+ 主动引擎（最高优先）
 
-### A 轨 — 反思平面（最便宜，先拿到可用产物）
+心智模型见 [spec/notion-integration.md](spec/notion-integration.md)：**Notion 是用户亲手打磨的真相，西西弗斯是它的大脑 + 传感器**——只读理解、白名单回写，绝不重写页面 / 生成 AI 长文。
 
-1. 在 `sisyphus/` 建"公共数据 + 处理层"：把现有 schema 演进为 **Event log + Artifact store** 双存储，实现唯一写入契约 `ingest_event(BehaviorEvent)`。
-2. 在其上建一个 **MCP server**，暴露 `capture / query_context / today_actions / propose_intents / accept_intent`（见 [spec/architecture.md](spec/architecture.md) §4）。
-3. 把 MCP server 挂到 Codex / Claude Code，并配置**每日任务**（早间规划、晚间复盘）。
-4. 自用一周：验证"零压记录 + 意图取代 TODO"（Phase 1.2）与 Agent-as-entry 架构是否成立。
+1. **`notion_indexer`（Notion → Core 只读索引）**：定时拉取 LifeIndex 页 → 按格式契约（callout=领域 / to_do=行动 / 标记=情境）确定性解析 → 写本地镜像表 `notion_actions`。读路径不调 LLM。放 mcp/app 层，不进 core。
+2. **Codex → Notion Inbox（append）**：用户 Codex 里挂官方 Notion MCP + 既有 sisyphus-mcp；skill 编排"一句话 → append 📥Inbox + `capture` 进 Core"。只追加不改结构。
+3. **主动引擎 v0（Core → Notion + 端侧通知）**：感知平面检测闲暇（idle / 娱乐超时 / 冷却）→ 从镜像里按情境标记挑一条低精力短时长行动 → 刷新 🔄NOW 挂件 + 弹通知；完成回写 `checked=true` + `strikethrough=true`（原文保留）。
+4. **给用户的《Notion 排版约定》一页纸**：照 spec §2、§4 轻改现有页面（加 NOW / Inbox 两块 + 情境标记）。
 
-### B 轨 — 感知平面（情感核心 + 递归监工）
+### 让闭环真正有用的小补丁（按性价比排序，都不需新架构）
 
-> 状态（2026-07-14）：采集器 → 规则 → 通知**已实现**（`sisyphus/src-tauri/src/collector.rs`，规则管道有测试）。剩下的是**你**真机自用验证（下方第 5 步的 kill-criteria）。
+1. **近端结果 outcome 观察**（1.1 缺口）：干预/提醒后 10 / 30 min 回看前台在干嘛，回填 `interventions.outcome`。把"感觉有没有用"变成"数据说话"。采集器 tick 里加一步即可。
+2. **浏览器插件**（桌面最大信号缺口）：`packages/browser-extension` 已有骨架。桌面真正的刷视频在浏览器内、原生 app 白名单抓不到。接一个 tab/URL → `ingest_event(url_visit)` 的最小插件。
+3. **LLM 生成干预文案**：现为 Rust 确定性模板。让反思平面（Codex）在冷却窗口预生成几条个性化文案缓存，命中时取用——引擎实时触发 + Agent 措辞温度。
 
-1. 在 `sisyphus/` 写 **macOS 前台窗口采集器**（Rust 轮询，故意做到最蠢：轮询前台 app 名 + 硬编码分类白名单，不做浏览器 URL、不做 Android）。
-2. 采集器经 `ingest_event` 写 `window_active` 事件 → 喂给已有的 `EntertainmentSessionRule`。
-3. 设今日目标，故意刷 15 分钟娱乐内容，**让它真的弹一条本地通知**（验证最核心也最玄的假设：一条提醒能否改变你自己的行为）。
-4. 干预四按钮写回 `interventions` + 回填 outcome（10/30min 后在干嘛）。
-5. **Kill-criteria**：连续自用 5 天，若一次都没因它改变行为 → 证明"通知式干预"对你无效，这是省下数月的宝贵结论，回来改设计。
+### 之后（Phase 2，明确延后）
 
-### 对拖延症开发者的推进纪律
+Supabase 同步 / 跨端联合分析、可学习策略（contextual bandit / 离线策略评估）、知识关系判定与剪枝、自研 Agent 基座、多用户安全边界。
 
-- 里程碑按"天"记，每步都要当天能自用，拿到多巴胺。
+### 对拖延症开发者的推进纪律（不变）
+
+- 里程碑按"天"记，每步当天能自用、拿到多巴胺。
 - 每个里程碑限时，超预估 2 倍还没通就砍需求，不许加东西。
-- B 轨一通就把今日目标设成"推进西西弗斯"，让项目自己当监工。
-- 明确**不要**碰：Android 采集、Supabase 同步、自研 Agent 基座、`artifacts` 多态大表、任何 AI 模型、多用户——全部延后。
+- 明确**延后不碰**：Supabase 同步、可学习策略、自研基座、多用户——全部等主线闭环稳定再说。

@@ -500,6 +500,41 @@ pub fn cancel_reminder(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// 取出到期待触发的提醒（pending 且 remind_at<=now），原子标记为 `fired` 防重复触发，返回它们。
+/// 采集器/前台服务每 tick 调用 → 到点弹通知。（recurrence 复发 MVP 暂不处理。）
+pub fn take_due_reminders(conn: &Connection, now_ms: i64) -> rusqlite::Result<Vec<Reminder>> {
+    let tx = conn.unchecked_transaction()?;
+    let mut due: Vec<Reminder> = Vec::new();
+    {
+        let mut stmt = tx.prepare(
+            "SELECT id, text, remind_at_ms, status, recurrence, created_at
+             FROM reminders WHERE status = 'pending' AND remind_at_ms <= ?1
+             ORDER BY remind_at_ms ASC",
+        )?;
+        let rows = stmt.query_map(params![now_ms], |r| {
+            Ok(Reminder {
+                id: r.get(0)?,
+                text: r.get(1)?,
+                remind_at_ms: r.get(2)?,
+                status: r.get(3)?,
+                recurrence: r.get(4)?,
+                created_at: r.get(5)?,
+            })
+        })?;
+        for r in rows {
+            due.push(r?);
+        }
+    }
+    for r in &due {
+        tx.execute(
+            "UPDATE reminders SET status = 'fired' WHERE id = ?1",
+            params![r.id],
+        )?;
+    }
+    tx.commit()?;
+    Ok(due)
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────
 
 fn f_str(v: &Value, key: &str) -> Option<String> {

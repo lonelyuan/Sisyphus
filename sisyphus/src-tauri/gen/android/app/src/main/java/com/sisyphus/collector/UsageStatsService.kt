@@ -118,6 +118,9 @@ class UsageStatsService : Service() {
 
         lastPollMs = nowMs
 
+        // 到期提醒：不依赖前台 app，每 tick 检查并弹通知。
+        fireDueReminders()
+
         // 进行中的娱乐时长（防漏算：未切走的会话不在 DB，作为 active_ms 注入规则）
         if (currentPkg.isEmpty()) {
             Log.d(TAG, "poll: 无前台 app（可能权限未授予，或本轮无 UsageEvents）")
@@ -154,6 +157,26 @@ class UsageStatsService : Service() {
             NativeBridge.ingestForeground(dbPath, currentPkg, currentCategory, currentStartMs, endMs)
         } catch (_: Throwable) {
             // 忽略，不中断轮询
+        }
+    }
+
+    /** 到期提醒 → 弹通知（经 JNI 原子取用，防重复）。 */
+    private fun fireDueReminders() {
+        val json = try {
+            NativeBridge.fireDueReminders(dbPath)
+        } catch (e: Throwable) {
+            Log.e(TAG, "fireDueReminders 失败", e)
+            return
+        }
+        try {
+            val arr = org.json.JSONArray(json)
+            for (i in 0 until arr.length()) {
+                val text = arr.getJSONObject(i).getString("text")
+                InterventionNotification(this).showReminder(text)
+                Log.i(TAG, "⏰ 提醒触发: $text")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "解析到期提醒失败", e)
         }
     }
 

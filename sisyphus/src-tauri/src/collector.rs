@@ -114,6 +114,12 @@ fn tick(
         eprintln!("[collector] 干预触发 rule={} sev={}", out.rule_id, out.severity);
     }
 
+    // 到期提醒：到点弹通知（原子标记 fired 防重复）。
+    for r in sisyphus_core::artifacts::take_due_reminders(conn, now).map_err(|e| e.to_string())? {
+        notify(app, &format!("⏰ 提醒：{}", r.text));
+        eprintln!("[collector] 提醒触发: {}", r.text);
+    }
+
     Ok(())
 }
 

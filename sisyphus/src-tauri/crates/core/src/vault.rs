@@ -110,8 +110,13 @@ pub fn write_note_at(
     relative_path: &str,
     note: &VaultNote,
 ) -> io::Result<WriteResult> {
-    fs::create_dir_all(vault_dir)?;
     let abs = vault_dir.join(relative_path);
+    // 建到文件所在子目录（relative_path 可能含分类文件夹，如 `web-security/xxx.md`）。
+    if let Some(parent) = abs.parent() {
+        fs::create_dir_all(parent)?;
+    } else {
+        fs::create_dir_all(vault_dir)?;
+    }
     let content = render_note(note);
     fs::write(&abs, &content)?;
     Ok(WriteResult {
