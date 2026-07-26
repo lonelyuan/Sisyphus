@@ -87,13 +87,12 @@ export function actionLabel(kind: string, payloadJson: string): string {
   switch (kind) {
     case "agent_run":
       if (p.mode === "introspect") return "知识库自省";
+      if (p.mode === "proactive_recommendation") return "主动推荐";
       return topic ? `深研 · ${topic.length > 16 ? topic.slice(0, 16) + "…" : topic}` : "知识任务";
     case "notify":
       return typeof p.title === "string" && p.title ? p.title : "提醒";
-    case "notion_now":
-      return "刷新 Notion 看板";
-    case "notion_inbox":
-      return "写入 Notion Inbox";
+    case "pet_message":
+      return typeof p.title === "string" && p.title ? p.title : "宠物提醒";
     default:
       return kind;
   }

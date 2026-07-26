@@ -27,11 +27,55 @@ pub struct RuleContext {
     pub current_category: Option<String>,
     /// 当前正在进行的娱乐会话时长（ms）。防漏算：未切走的 session 不在 DB 中，由调用方注入。
     pub active_entertainment_ms: i64,
+    /// 当前前台会话已持续时长（ms，不限分类）。动态规则用它补齐进行中的未闭合会话。
+    /// 0 = 未知。调用方（采集器）用 `now - session.start` 注入。
+    #[serde(default)]
+    pub active_session_ms: i64,
     /// Layer 2：媒体通知开始时间（epoch ms）。0 = Layer 2 未启用或未播放。
     pub media_playing_since_ms: i64,
     /// Layer 3：过去 10min scroll_burst 总次数。0 = Layer 3 未启用。
     pub recent_scroll_count: i64,
     pub today_goal: Option<DailyGoal>,
+}
+
+/// 命中后的响应策略（proactive-triggers.md §3 的可拓展 seam）。
+/// 规则只表达"检出了什么 + 该怎么回应"，不直接产生副作用；由 [`crate::intervention`]
+/// 翻译成"立即派发"或"入队 `scheduled_actions`"。可从动态规则的 `response_json` 反序列化。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "policy", rename_all = "snake_case")]
+pub enum ResponsePolicy {
+    /// 立即：由调用方当拍派发（保实时）。kind = notify | pet_message。
+    Immediate {
+        #[serde(default = "default_action_kind")]
+        kind: String,
+    },
+    /// 延后：now+after_ms 入队，由 app ticker 到点派发。
+    Deferred {
+        #[serde(default = "default_action_kind")]
+        kind: String,
+        after_ms: i64,
+    },
+    /// 防打扰：带 dedup_key 入队，窗口内同 key 只提醒一次。
+    Debounce {
+        #[serde(default = "default_action_kind")]
+        kind: String,
+        window_ms: i64,
+        dedup_key: String,
+    },
+    /// 不打扰（冷却期 / 夜间免打扰等）。
+    Suppress,
+}
+
+fn default_action_kind() -> String {
+    "notify".to_string()
+}
+
+impl Default for ResponsePolicy {
+    fn default() -> Self {
+        ResponsePolicy::Immediate {
+            kind: default_action_kind(),
+        }
+    }
 }
 
 /// 规则命中结果，传给 InterventionDecider 生成干预消息。
@@ -44,6 +88,12 @@ pub struct Finding {
     pub context_snapshot: serde_json::Value,
     pub recommended_intervention_types: Vec<String>,
     pub parent_event_ids: Vec<String>,
+    /// 命中后的响应策略（默认 Immediate→notify，保持既有实时行为）。
+    #[serde(default)]
+    pub response: ResponsePolicy,
+    /// 可选的定制干预文案。None 时 [`crate::intervention`] 用默认娱乐模板。
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 // ── Rule trait ────────────────────────────────────────────────────────────────
@@ -70,6 +120,7 @@ impl RuleEngine {
     }
 
     /// 评估所有规则，返回第一个命中的 Finding（每次最多触发一条）。
+    /// 先跑内置规则，再跑数据库里用户/智能体建的动态规则（`detection_rules`，每次热加载）。
     pub fn evaluate(
         &self,
         ctx: &RuleContext,
@@ -80,6 +131,35 @@ impl RuleEngine {
                 return Ok(Some(finding));
             }
         }
+        for rule in crate::rules::load_enabled_rules(conn)? {
+            if let Some(finding) = rule.evaluate(ctx, conn)? {
+                return Ok(Some(finding));
+            }
+        }
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_response_policy_json() {
+        // 动态规则的 response_json 就用这个形状（批次 C 依赖）。
+        let imm: ResponsePolicy =
+            serde_json::from_str(r#"{"policy":"immediate","kind":"pet_message"}"#).unwrap();
+        assert!(matches!(imm, ResponsePolicy::Immediate { kind } if kind == "pet_message"));
+
+        // kind 省略时默认 notify。
+        let def: ResponsePolicy =
+            serde_json::from_str(r#"{"policy":"deferred","after_ms":600000}"#).unwrap();
+        assert!(matches!(def, ResponsePolicy::Deferred { kind, after_ms } if kind == "notify" && after_ms == 600_000));
+
+        let sup: ResponsePolicy = serde_json::from_str(r#"{"policy":"suppress"}"#).unwrap();
+        assert!(matches!(sup, ResponsePolicy::Suppress));
+
+        // 默认策略是立即 notify（保持既有实时行为）。
+        assert!(matches!(ResponsePolicy::default(), ResponsePolicy::Immediate { kind } if kind == "notify"));
     }
 }

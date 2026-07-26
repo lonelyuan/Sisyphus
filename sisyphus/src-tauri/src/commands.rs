@@ -1,13 +1,14 @@
-use std::sync::Mutex;
-use std::path::PathBuf;
-use serde::{Deserialize, Serialize};
-use tauri::State;
+use crate::agent_runtime;
 use chrono::Utc;
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
+use sisyphus_core::context::{self, TodayContext};
 use sisyphus_core::db;
 use sisyphus_core::ingest::{self, NewEvent};
-use sisyphus_core::context::{self, TodayContext};
 use sisyphus_core::rule_engine::{RuleContext, RuleEngine};
+use std::path::PathBuf;
+use std::sync::Mutex;
+use tauri::State;
 
 // ── AppState ──────────────────────────────────────────────────────────────────
 
@@ -18,6 +19,8 @@ pub struct AppState {
     pub device_id: String,
     /// Obsidian 知识库目录（第二大脑 vault）。
     pub vault_dir: PathBuf,
+    /// app 数据目录（存 llm_config.json 等）。
+    pub data_dir: PathBuf,
 }
 
 // ── 命令输入 / 输出类型 ───────────────────────────────────────────────────────
@@ -73,13 +76,15 @@ pub fn evaluate_rules(
         current_app: ctx.current_app,
         current_category: ctx.current_category,
         active_entertainment_ms: ctx.active_entertainment_ms,
+        active_session_ms: ctx.active_entertainment_ms,
         media_playing_since_ms: ctx.media_playing_since_ms,
         recent_scroll_count: ctx.recent_scroll_count,
         today_goal: goal,
     };
 
-    let out = sisyphus_core::intervention::evaluate_and_record(&conn, &state.rule_engine, &rule_ctx)
-        .map_err(|e| e.to_string())?;
+    let out =
+        sisyphus_core::intervention::evaluate_and_record(&conn, &state.rule_engine, &rule_ctx)
+            .map_err(|e| e.to_string())?;
 
     Ok(out.map(|o| FindingOutput {
         rule_id: o.rule_id,
@@ -93,7 +98,9 @@ pub fn evaluate_rules(
 #[tauri::command]
 pub fn set_goal(state: State<'_, AppState>, text: String) -> Result<(), String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
-    context::set_goal(&conn, &text).map(|_| ()).map_err(|e| e.to_string())
+    context::set_goal(&conn, &text)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// 更新目标状态（started / completed / skipped / abandoned）。
@@ -128,7 +135,9 @@ pub fn get_today_context(state: State<'_, AppState>) -> Result<TodayContext, Str
 // ── 数据展示 + 增删查改（感知平面 App「今日/记录」页）─────────────────────────
 
 #[tauri::command]
-pub fn list_tasks(state: State<'_, AppState>) -> Result<Vec<sisyphus_core::artifacts::Task>, String> {
+pub fn list_tasks(
+    state: State<'_, AppState>,
+) -> Result<Vec<sisyphus_core::artifacts::Task>, String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
     sisyphus_core::artifacts::list_tasks(&conn, 100).map_err(|e| e.to_string())
 }
@@ -193,12 +202,23 @@ pub fn list_interventions(
     sisyphus_core::timeline::list_interventions(&conn, 50).map_err(|e| e.to_string())
 }
 
+/// 无极时间轴窗口查询。缩放级别由前端连续计算后传入，后端负责裁剪与聚合。
 #[tauri::command]
-pub fn list_sessions(
+pub fn query_timeline(
     state: State<'_, AppState>,
-) -> Result<Vec<sisyphus_core::timeline::SessionRow>, String> {
+    start_ms: i64,
+    end_ms: i64,
+    detail: String,
+    max_items: Option<i64>,
+) -> Result<sisyphus_core::timeline::TimelineResponse, String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
-    sisyphus_core::timeline::list_recent_sessions(&conn, 60).map_err(|e| e.to_string())
+    sisyphus_core::timeline::query_timeline(
+        &conn,
+        start_ms,
+        end_ms,
+        &detail,
+        max_items.unwrap_or(1_500),
+    )
 }
 
 #[tauri::command]
@@ -246,6 +266,217 @@ pub fn get_vault_path(state: State<'_, AppState>) -> String {
     state.vault_dir.to_string_lossy().to_string()
 }
 
+// ── 动态检测规则（Settings 规则列表：查看 / 启停 / 删）────────────────────────
+
+#[tauri::command]
+pub fn list_detection_rules(
+    state: State<'_, AppState>,
+) -> Result<Vec<sisyphus_core::rules::DetectionRule>, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    sisyphus_core::rules::list_rules(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_detection_rule_enabled(
+    state: State<'_, AppState>,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    sisyphus_core::rules::set_rule_enabled(&conn, &id, enabled).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_detection_rule(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    sisyphus_core::rules::delete_rule(&conn, &id).map_err(|e| e.to_string())
+}
+
+/// 人生看板卡片（看齐 Notion 的本地投影，供「看板」页展示）。
+#[tauri::command]
+pub fn list_lifeindex(
+    state: State<'_, AppState>,
+) -> Result<Vec<sisyphus_core::lifeindex::LifeIndexCard>, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    sisyphus_core::lifeindex::list_cards(&conn).map_err(|e| e.to_string())
+}
+
+/// 当前 Agent runtime、可执行文件与只读能力状态。
+#[tauri::command]
+pub async fn get_agent_runtime_status(
+    state: State<'_, AppState>,
+) -> Result<agent_runtime::AgentRuntimeStatus, String> {
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || agent_runtime::status(&data_dir))
+        .await
+        .map_err(|e| format!("读取 Agent runtime 状态失败: {e}"))
+}
+
+/// 保存默认 runtime。`auto` 优先 Pi、不可用时回退 Codex。
+#[tauri::command]
+pub fn set_agent_runtime(state: State<'_, AppState>, runtime: String) -> Result<(), String> {
+    agent_runtime::write_config(&state.data_dir, runtime.trim())
+}
+
+/// 主对话 / 宠物共用的只读 Agent 入口。
+#[tauri::command]
+pub async fn run_agent(
+    state: State<'_, AppState>,
+    prompt: String,
+    runtime: Option<String>,
+    run_id: Option<String>,
+) -> Result<agent_runtime::AgentRunOutput, String> {
+    if prompt.trim().is_empty() {
+        return Err("消息不能为空".to_string());
+    }
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        agent_runtime::run_agent(
+            &data_dir,
+            &prompt,
+            runtime.as_deref(),
+            run_id.as_deref(),
+            agent_runtime::RunMode::Interactive,
+        )
+    })
+    .await
+    .map_err(|e| format!("Agent 任务 join 失败: {e}"))?
+}
+
+/// 停止主对话当前的 Pi SDK / Codex 子进程。
+#[tauri::command]
+pub fn cancel_agent_run(run_id: String) -> bool {
+    agent_runtime::cancel_agent_run(&run_id)
+}
+
+/// Pi JS SDK 连接配置：provider/API 格式 + 自定义 endpoint + key + 模型。
+/// 持久化在 app 数据目录，key 只在 Rust 与 SDK sidecar 之间传递。
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct LlmConfig {
+    /// pi-ai provider id；openai 默认使用 Responses API。
+    #[serde(default)]
+    pub format: String,
+    /// 自定义 API base URL（留空=用该 provider 默认）
+    #[serde(default)]
+    pub base_url: String,
+    /// 模型名（pi-ai provider 目录内的模型 id）
+    #[serde(default)]
+    pub model: String,
+    /// API key（仅后端保存，不随 get_llm_config 返回）
+    #[serde(default)]
+    pub api_key: String,
+}
+
+fn llm_config_path(state: &AppState) -> PathBuf {
+    state.data_dir.join("llm_config.json")
+}
+
+fn read_llm_config(state: &AppState) -> LlmConfig {
+    std::fs::read_to_string(llm_config_path(state))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// 读 LLM 配置（**不含 key**，只回 has_key 标记）。供前端构建 provider。
+#[tauri::command]
+pub fn get_llm_config(state: State<'_, AppState>) -> serde_json::Value {
+    let c = read_llm_config(&state);
+    serde_json::json!({
+        "format": c.format,
+        "base_url": c.base_url,
+        "model": c.model,
+        "has_key": !c.api_key.is_empty(),
+    })
+}
+
+/// 写 LLM 配置（format/base/model/key）。api_key 传空则保留原 key（改其它项不清 key）。
+#[tauri::command]
+pub fn set_llm_config(
+    state: State<'_, AppState>,
+    format: String,
+    base_url: String,
+    model: String,
+    api_key: String,
+) -> Result<(), String> {
+    let mut c = read_llm_config(&state);
+    c.format = format.trim().to_string();
+    c.base_url = base_url.trim().to_string();
+    c.model = model.trim().to_string();
+    if c.format.is_empty() {
+        return Err("请选择 Provider / API 协议".to_string());
+    }
+    if c.model.is_empty() {
+        return Err("请填写模型 ID".to_string());
+    }
+    if !api_key.trim().is_empty() {
+        c.api_key = api_key.trim().to_string();
+    }
+    if c.api_key.is_empty()
+        && std::env::var("SISYPHUS_LLM_API_KEY")
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+    {
+        return Err("请填写 API Key".to_string());
+    }
+    let json = serde_json::to_string_pretty(&c).map_err(|e| e.to_string())?;
+    let path = llm_config_path(&state);
+    std::fs::write(&path, json).map_err(|e| format!("写 LLM 配置失败: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("收紧 LLM 配置文件权限失败: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Notion 只读集成：官方 `@notionhq/notion-mcp-server`（NOTION_TOKEN）。
+/// 机制保证只读——建议用户在 Notion 侧创建只给 "Read content" 权限的 integration token，
+/// 这样即使模型误调用写工具，Notion API 侧也会拒绝（不靠提示词自觉，见 notion-integration.md §2.1）。
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct NotionConfig {
+    #[serde(default)]
+    pub token: String,
+}
+
+fn notion_config_path(state: &AppState) -> PathBuf {
+    state.data_dir.join("notion_config.json")
+}
+
+fn read_notion_config(state: &AppState) -> NotionConfig {
+    std::fs::read_to_string(notion_config_path(state))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// 读 Notion 配置（**不含 token**，只回 has_token 标记）。
+#[tauri::command]
+pub fn get_notion_config(state: State<'_, AppState>) -> serde_json::Value {
+    let c = read_notion_config(&state);
+    serde_json::json!({ "has_token": !c.token.is_empty() })
+}
+
+/// 写 Notion integration token。传空串清空配置（关闭 Notion 集成）。
+#[tauri::command]
+pub fn set_notion_config(state: State<'_, AppState>, token: String) -> Result<(), String> {
+    let c = NotionConfig {
+        token: token.trim().to_string(),
+    };
+    let json = serde_json::to_string_pretty(&c).map_err(|e| e.to_string())?;
+    let path = notion_config_path(&state);
+    std::fs::write(&path, json).map_err(|e| format!("写 Notion 配置失败: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("收紧 Notion 配置文件权限失败: {e}"))?;
+    }
+    Ok(())
+}
+
 /// 主动触发：即将到来的待办动作（proactive-triggers.md）。供「今日 · 主动计划」展示
 /// 每日自省 / 支线梳理等排程；桌面端由调度器 ticker 播种，安卓暂无（返回空）。
 #[tauri::command]
@@ -287,7 +518,10 @@ pub async fn run_knowledge_agent(
             Ok(stdout)
         } else {
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-            Err(format!("知识 agent 退出码 {:?}\n{stderr}", out.status.code()))
+            Err(format!(
+                "知识 agent 退出码 {:?}\n{stderr}",
+                out.status.code()
+            ))
         }
     })
     .await

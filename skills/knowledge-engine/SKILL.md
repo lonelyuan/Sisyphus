@@ -11,14 +11,16 @@ description: 知识工程 · 成体系的第二大脑。把每次问答/材料�
 
 **这版最要治的病：别每次对话结一张卡。** 卡的粒度 = 检索与复用的粒度，不是聊天轮次的粒度。**一张卡是一颗知识结晶，同主题多轮对话应让同一颗结晶长大变致密，而不是析出一堆碎晶。** 这是主循环的灵魂，详见 [references/crystallization.md](references/crystallization.md)。
 
+**标题必须短，关系必须先于页面。** 标题只写未来会检索的主题名，默认 2–8 个汉字或不超过 5 个英文词；文件夹、type、公司名、时间、状态和解释性副标题不塞进标题。建卡前先回答“它挂在哪颗母结晶下、与哪些现有节点互链”，不能回答就先归并或补 MOC，不得用新页面逃避组织。
+
 ## 数据模型（先记住这张图）
 
 **两个物理隔离的存储，绝不混：**
 - `kb/` —— **知识图谱**：你总结的、结构化 + `[[链接]]` 化的卡片。**这就是博客内容。**
-- `sources/` —— **原始材料库**：值得原文保存的文章/报告，逐字归档（`save_source`）。**不进图谱、不导出博客**，只作溯源。kb 卡片经 frontmatter `sources:` 引用原文路径——这是桥，不是混合。
+- `sources/` —— **高价值外部原始材料库**：仅逐字归档重要的外部文章/报告（`save_source`）。**不是链接收件箱，不是每份材料的默认落点。** 用户本人持续维护的 KM/文档属于第一方成品：直接从相关 MOC/卡片链接原文，不复制进 `sources/`，也不另写一张“精炼版”制造双份真相。
 
 **两个正交的分类轴：**
-- **话题领域 = 文件夹树 = 博客栏目**（`write_knowledge_note` 的 `folder`，**值一律以 `kb/` 开头**）：`kb/web-security` / `kb/network-infra` / `kb/ai-redteam` / `kb/work-mihoyo/{state,best-practice}` / `kb/personal`。持续维护使各栏目粒度均衡、抽象一致（详见 [references/taxonomy.md](references/taxonomy.md)）。
+- **话题领域 = 文件夹树 = 博客栏目**（`write_knowledge_note` 的 `folder`，**值一律以 `kb/` 开头**）：`kb/web-security` / `kb/network-infra`（含 `identity-system` 等子话题）/ `kb/ai-redteam` / `kb/work-mihoyo/{state,best-practice}` / `kb/personal`。持续维护使各栏目粒度均衡、抽象一致（详见 [references/taxonomy.md](references/taxonomy.md)）。
 - **文章类型 = frontmatter `type` + 标签**（不是文件夹）：`theory` / `news` / `state` / `best-practice` / `personal`。**决定生命周期与链接规则**（详见 [references/types.md](references/types.md)）——这是这版的关键：不同类型不能用同一套规则，尤其 `state`（我司现状）与 `best-practice`（理想）绝不混、`personal` 不与技术强链。
 
 ## 四大场景（功能路由）
@@ -43,22 +45,26 @@ description: 知识工程 · 成体系的第二大脑。把每次问答/材料�
    - **重复** → 已有结晶已覆盖且够好 → **不动库**（最多补一条来源/例子）。
    - **扩充已有** → 有对应结晶但薄/缺一个侧面 → 走 4「归并」，长一个 H2 小节（**默认路径**）。
    - **全新话题** → 无对应结晶且过原子性双筛 → 走 4「新建」一颗结晶。
-1. **收原件**（仅当给的是值得留存的成块材料/链接/文档）：`save_source(title, content, url, source_type)` 归档到 `sources/`。纯问答跳过。
+1. **判来源，不默认收原件**：
+   - 用户本人持续维护、已经精心整理的 KM/文档 = **第一方成品**：只把原链接织入最相关的已有 MOC/卡片；不 `save_source`、不重写摘要、不为它单开影子卡。
+   - 外部文章/报告 = 仅当内容重要、未来确需逐字溯源或链接可能失效，才 `save_source(title, content, url, source_type)`；普通链接直接引用 URL 或不落库。
+   - 纯问答跳过。
 2. **抽候选**：挑 0–3 个**值得沉淀**的概念（三道筛见 pipelines.md，宁缺毋滥）。
-3. **认主题 + 归位**（这版关键）：为每块知识命名它的**耐久主题**（按"未来会查什么"命名，如"雅思"而非"雅思分数"），判定**话题领域**（→ `folder`）与**文章类型**（→ `type`）。拿不准领域看 [references/taxonomy.md](references/taxonomy.md)；无处可归则**提议新领域节点**，不丢杂项。
-4. **归并优先，非新建**：`search_knowledge` + `list_knowledge` 按**主题**（不只是标题）查——
+3. **认主题 + 短命名 + 归位**（这版关键）：为每块知识命名它的**耐久主题**（按"未来会查什么"命名，如"雅思"而非"雅思分数"）。标题删掉可由 folder/type/tags/正文表达的前后缀，如“米哈游/企业级/现状/解析/知识体系/核心输出目录”；默认 2–8 个汉字或 ≤5 个英文词，标准术语本身较长时除外。再判定**话题领域**（→ `folder`）与**文章类型**（→ `type`）。
+4. **先织图，再决定是否有页面**：先找母结晶/MOC 和 2–5 个真实相关节点，说明父子、对照、依赖或 gap 关系；再用 `search_knowledge` + `list_knowledge` 按**主题**（不只是标题）查——
    - **已有这颗结晶** → **读回它、加/精一个 H2 小节写超集**（theory 补充式，绝不删已验证内容）。**这是默认路径。**
    - **没有** → 过[原子性双筛](references/crystallization.md#原子性双筛它配单独一张卡还是只是某颗结晶的一节)：*会被直接按名检索吗？会被 ≥2 主题引用/会撑爆母卡吗？* **两关都过才新建一颗**；有一关不过，说明它是某颗结晶的**小节**——归并进去（母结晶不存在就新建母结晶、把它当第一节播下）。
-5. **建/长卡**：`write_knowledge_note(folder=…, title, body, tags, links, sources)`，格式严格照 [references/format.md](references/format.md)；正文按 H2 小节组织，便于逐节增生。`links` 填 2–5 个已存在的相关卡片；跨 type 链接遵守 types.md 的边界。
+5. **建/长卡**：`write_knowledge_note(folder=…, title, body, tags, links, sources)`，格式严格照 [references/format.md](references/format.md)；正文按 H2 小节组织，便于逐节增生。`links` 填 2–5 个已存在且关系明确的卡片；禁止为了满足数量链接泛化节点。跨 type 链接遵守 types.md 的边界。
 6. **回报**：答复末尾一行 `📚 已沉淀：长入 [[雅思备考]]·新小节「分数水平」 / 新建 [[X]]（web-security/theory）· 存原文：sources/…`（本轮不动库就说"本轮无新增"），供用户纠错。
 
 ## 铁律
 
 1. **卡=结晶，不是对话；默认归并，非新建**：同主题多轮 → 长大同一颗结晶（加 H2 小节），别每次对话另开碎卡。建新卡前先过[原子性双筛](references/crystallization.md#原子性双筛它配单独一张卡还是只是某颗结晶的一节)——过不了的一律作为已有结晶的小节。宁缺毋滥，一轮最多长/建 1–3 颗。
-2. **不确定标 `#待确认`，绝不编造**：证据不足进「待确认」区，别写成肯定句。
-3. **必分类、必织图**：每张卡必有 `folder` 和 `type`；至少 1 条 `links`。无处可归先提议新领域，别丢根目录。
-4. **两个隔离**：① `sources/` 原文绝不进 kb 图谱；② `state`（我司现状）与 `best-practice`（理想）绝不写进同一张卡，用 gap 链接表达差距。
-5. **平衡 + 结晶化维护**：领域 >~12 卡提议拆子话题，长期 <2 卡提议上并，树深 ≤3；发现同主题碎卡簇（如 `雅思*`）→ 走[去碎片化例程](references/crystallization.md#去碎片化defragment例程)合并 + `delete_note` 清冗余（[references/taxonomy.md](references/taxonomy.md)）。
+2. **标题短，关系先行**：标题只保留主题规范名，默认 2–8 个汉字或 ≤5 个英文词；组织、公司、类型、时间、状态和内容摘要交给 folder/tags/正文。先确定母节点与真实关系，再允许新建；禁止用长标题代替知识组织。
+3. **不确定标 `#待确认`，绝不编造**：证据不足进「待确认」区，别写成肯定句。
+4. **必分类、必织图**：每张卡必有 `folder` 和 `type`；至少 1 条有语义的 `links`。无处可归先提议新领域或补 MOC，别丢根目录。
+5. **三个隔离**：① `sources/` 只存重要外部原文，绝不进 kb 图谱；② 第一方成品只链接、不复制、不二次精炼；③ `state`（我司现状）与 `best-practice`（理想）绝不写进同一张卡，用 gap 链接表达差距。
+6. **平衡 + 结晶化维护**：领域 >~12 卡提议拆子话题，长期 <2 卡提议上并；发现同主题碎卡簇（如 `雅思*`）→ 走[去碎片化例程](references/crystallization.md#去碎片化defragment例程)合并 + `delete_note` 清冗余（[references/taxonomy.md](references/taxonomy.md)）。
 
 ## 数据边界
 

@@ -28,9 +28,9 @@ Phase 0 / 1.0 / 1.1 / 1.2 / 1.3 的核心闭环均已落地并在本机跑通（
 
 **超出原 MVP 的额外落地**：感知平面 App 常驻（tray / 关窗不退 / 开机自启）、Codex 风深色 UI（今日 / 记录 / 设置 三页 + 目标·任务 CRUD）、监控名单跨端增删查改、Android 端可编译运行。
 
-**当前主线（2026-07-20 调整）**：Notion 集成（LifeIndex 双向流）+ 主动引擎。见 [spec/notion-integration.md](spec/notion-integration.md) 与文末「近期推荐下一步」。
+**当前主线（2026-07-26 调整）**：Notion 只读上下文源 + 主动推荐闭环。见 [spec/notion-integration.md](spec/notion-integration.md) 与文末「近期推荐下一步」。
 
-> **kill-criteria 已废弃（2026-07-20 用户决定）**：原以"连续 5 天通知未改变行为→证明无效"当 kill 门。用户判断该门逻辑上无法证伪（永远可归因于"实现不够好"），既不能证伪 idea、反而拖着不敢往下做。故不再当验证门槛，改当**持续打磨的实现质量问题**。"通知/主动提醒能改变行为"作为项目公理，实现形态（通知/NOW 挂件/遮罩/对话）持续迭代。
+> **kill-criteria 已废弃（2026-07-20 用户决定）**：原以"连续 5 天通知未改变行为→证明无效"当 kill 门。用户判断该门逻辑上无法证伪（永远可归因于"实现不够好"），既不能证伪 idea、反而拖着不敢往下做。故不再当验证门槛，改当**持续打磨的实现质量问题**。"主动提醒能改变行为"作为项目公理，实现形态（宠物/系统通知/遮罩/对话）持续迭代。
 
 ---
 
@@ -56,7 +56,7 @@ Phase 0 / 1.0 / 1.1 / 1.2 / 1.3 的核心闭环均已落地并在本机跑通（
 |---|---|---|
 | 总入口 · InputBox + 意图识别（原 1.2 原声笔记） | 无压记录 + 功能路由 | 任意输入 → `capture` → 意图识别 → 路由到下面三模块 |
 | 1.1 西西弗斯计划（狭义） | 低效习惯与拖延的数字干预 | 行为采集 → 风险识别 → Agent 干预 → 用户反馈 → 近端结果 |
-| LifeIndex · 人生看板 | 人与智能体共享的上下文，一眼知下一步 | Notion(真相) ↔ 本地索引 → 主动引擎挑时机提醒（见 [spec/notion-integration.md](spec/notion-integration.md)） |
+| LifeIndex · 人生看板 | 用户按原习惯维护、智能体只读理解的个人上下文 | Notion（用户编辑）→ 本地只读镜像；触发时与本地状态联合推理 → 宠物 / 通知（见 [spec/notion-integration.md](spec/notion-integration.md)） |
 | 1.3 第二大脑 | 和人一同进化的知识工程 | 原始材料/目标 → 学习加工 → 知识库(vault)/知识图谱 → 可读输出/教学 |
 
 ### 统一入口
@@ -190,7 +190,7 @@ MVP 范围：
 
 ```text
 散乱输入
-  → Capture Inbox
+  → 本地 Capture 待处理队列（不是 Notion Inbox）
   → 意图提取
   → 候选对象
   → 用户确认/安全自动落盘
@@ -306,16 +306,33 @@ MVP 范围：
 
 ## 近期推荐下一步
 
-三条轨道——A 反思平面、B 感知平面（macOS 采集器）、跨端安卓（UsageStats→JNI 后台闭环）——都已跑通。**Core、采集、干预、UI 都不再是瓶颈**。当前主线转向**让西西弗斯丝滑融入用户既有的 Notion 生态**，并把感知平面的闲暇检测接成"主动提醒下一步"。
+三条轨道——A 反思平面、B 感知平面（macOS 采集器）、跨端安卓（UsageStats→JNI 后台闭环）——都已跑通。**Core、采集、干预、UI 都不再是瓶颈**。当前主线转向**把用户既有的 Notion 当成只读信息源**，并把定时 / 闲暇触发接成“读取本地 + 刷新 Notion → 主动推荐此刻一件事”。
 
-### 主线：Notion 集成（LifeIndex 双向流）+ 主动引擎（最高优先）
+### 当前冲刺：以可用性为目标推进（分批，逐批验证 + 更新本节）
 
-心智模型见 [spec/notion-integration.md](spec/notion-integration.md)：**Notion 是用户亲手打磨的真相，西西弗斯是它的大脑 + 传感器**——只读理解、白名单回写，绝不重写页面 / 生成 AI 长文。
+目标：让 **Pi / Codex 两个基座都能从 app 内真正驱动**西西弗斯全部功能（反拖延含动态规则、第二大脑、人生看板），并富化时间轴。计划见 `.claude/plans/`。
 
-1. **`notion_indexer`（Notion → Core 只读索引）**：定时拉取 LifeIndex 页 → 按格式契约（callout=领域 / to_do=行动 / 标记=情境）确定性解析 → 写本地镜像表 `notion_actions`。读路径不调 LLM。放 mcp/app 层，不进 core。
-2. **Codex → Notion Inbox（append）**：用户 Codex 里挂官方 Notion MCP + 既有 sisyphus-mcp；skill 编排"一句话 → append 📥Inbox + `capture` 进 Core"。只追加不改结构。
-3. **主动引擎 v0（Core → Notion + 端侧通知）**：感知平面检测闲暇（idle / 娱乐超时 / 冷却）→ 从镜像里按情境标记挑一条低精力短时长行动 → 刷新 🔄NOW 挂件 + 弹通知；完成回写 `checked=true` + `strikethrough=true`（原文保留）。
-4. **给用户的《Notion 排版约定》一页纸**：照 spec §2、§4 轻改现有页面（加 NOW / Inbox 两块 + 情境标记）。
+- **批次 A ✅ 已落地（本次）** — 地基：
+  - 解除 in-app 智能体的硬编码只读：`agent_runtime::RunMode{Interactive,Proactive}`；主对话/宠物=可写（可 `set_goal`/`add_monitored_app`/建规则/写知识），定时/规则触发=严格只读。外部源（Notion）恒只读。
+  - 修编译期路径依赖：`agent_runtime::init_paths` 用运行期 `resource_dir()` 注入 skills/pi-runner/mcp 路径；release 不再烘焙 `CARGO_MANIFEST_DIR`（退回 `current_exe`）；`tauri.conf.json` 打包 `skills/`、`scripts/`。
+  - 修调度器阻塞：`agent_run` 移到 worker 线程，不再卡住 30s ticker 里的 `notify`。
+  - 立 `ResponsePolicy` seam（core `rule_engine`：Immediate/Deferred/Debounce/Suppress）：命中即时→notify，延后/防打扰→入队 `scheduled_actions`；补 `pet_message` 派发分支（emit `pet-message`，`Pet.tsx` 已监听）。
+- **批次 B ✅ 已落地（本次）** — Pi 基座接 MCP 工具面：`scripts/pi-agent-runtime.mjs` spawn `sisyphus-mcp`（stdio），`listTools` 后用 `Type.Unsafe(inputSchema)` 逐个包成 Pi `customTool`；系统提示按 `SISYPHUS_READ_ONLY` 切交互/只读。新增依赖 `@modelcontextprotocol/sdk`、`@sinclair/typebox`。桥已冒烟验证（连上→17 工具→set_goal 写→query_context 读回）。Pi 与 Codex 现共用同一工具契约。
+- **批次 C ✅ 已落地（本次）** — 动态规则引擎（“一句话建规则”）：`detection_rules` 表 + 声明式 `core::rules::DynamicRule`（category_prefix/category_in/app_in + window/threshold + requires_active_goal + time_of_day，跨午夜）；`RuleEngine::evaluate` 每次热加载启用规则。MCP 工具 `create/list/set_enabled/delete_detection_rule`（可写门禁）+ 同名 Tauri 命令 + Settings 规则列表（查看/启停/删）+ skill `references/rules.md`。core 单测 3/3、MCP 建/列/只读拒写均已冒烟验证。
+- **批次 D ✅ 已落地（本次）** — 人生看板 LifeIndex：`lifeindex_cards` 表（(section,title) 幂等 upsert，可重建投影）+ MCP `upsert_lifeindex_card`/`list_lifeindex`/`delete_lifeindex_card` + Tauri `list_lifeindex` + 「看板」tab（分区卡片、Notion 溯源链接）。MCP 写门禁细化为三档 `write_scope`（只读 / 仅看板 / 全写）；新增 `RunMode::LifeIndex` + 每日 8:30 `agent_run(mode=lifeindex_refresh)` job：agent 只读参考 Notion + 本地上下文后仅写本地看板，绝不回写 Notion。已冒烟验证（仅看板可写、set_goal 被拒、list 正常）。
+- **批次 E ✅ 已落地（本次）** — 时间轴富化：`query_timeline` 新增 artifact 里程碑图层（目标/任务/提醒/知识卡片/规则创建，点事件）+ note_text 重标为 capture 图层；`TimelineScreen` 按 kind 配色、里程碑画独立小圆标记、详情面板显中文类型标签。所有尺度都展示稀疏里程碑。
+- **批次 F ✅ 已落地（本次）** — 清理死代码（删 `TodayScreen`/`RecordsScreen` + `list_sessions`/`list_recent_sessions`/`SessionRow`）；回写 spec（rule-engine 动态规则、proactive-triggers §4/§7 状态、architecture §9、local-storage 表清单、agent 运行模式）；更新项目记忆（proactive_triggers / pi_agent_inapp）。
+- **批次 G ✅ 已落地（同日追加）** — 排查"智能体没权限"发现两个根因并修复：① `pi-agent-runtime.mjs` 的 `DefaultResourceLoader` 会自动加载项目/全局 `.pi/extensions/pi-permission-system`（给交互终端 UI 写的扩展），在我们的 headless 子进程里对每次工具调用返回"需要审批但无 UI"而拒绝——加 `noExtensions: true` 跳过；② SDK 文档说 `noTools:"builtin"` 会保留 custom tools，但实现里未提供 `tools` 允许名单时不会激活它们——改为显式 `tools: sisyphusTools.map(t=>t.name)`。顺带接入 Notion 只读集成：官方 `@notionhq/notion-mcp-server`，Pi 侧多开一个 MCP client 合并工具面、Codex 侧用 `-c mcp_servers.notion.*` 注入，token 存 `notion_config.json`（0600）+ Settings 新卡片；只读边界由 Notion 侧 integration 权限（仅 "Read content"）机制保证。`AgentScreen` 会话删除失效（`window.confirm` 在 Tauri webview 里常返回 false）一并修复。详见 `docs/spec/notion-integration.md` §8"现状"小节。
+
+### 主线：只读上下文源 + 主动推荐闭环（最高优先）
+
+心智模型见 [spec/notion-integration.md](spec/notion-integration.md)：**Notion 里的内容只有用户编辑；西西弗斯读取用户更新，并与本地行为状态联合推理。** 不建 Inbox / NOW，不回写完成状态。
+
+1. **通用 `ContextSource` + 只读 `NotionContextSource`**：只授权用户选择的页面 / 数据源；主动智能体只拿 list / read / query，工具面没有 create / update / append / delete。
+2. **通用本地镜像**：用 `source_connections` / `source_snapshots` 保存来源、外部 ID、更新时间、观测时间、hash 和 payload。镜像可重建，不新增 `notion_actions` 任务真相。
+3. **主动推荐 v0**：定时器或闲暇规则 enqueue `agent_run(mode=proactive_recommendation)` → 并行读 `query_context` 与刷新后的 Notion 上下文 → 最多生成 1 条带 source refs 的推荐或 `no_recommendation`。
+4. **统一投递**：宿主做新鲜度、隐私、冷却与去重校验；宠物和系统通知消费同一个 recommendation id；反馈与近端结果只落本地。
+5. **验收只读闭环**：用只读凭据跑通“用户改 Notion → 下次触发读到新版本 → 联合本地状态推理 → 宠物 / 通知”，并验证 Notion 无任何写请求。
 
 ### 让闭环真正有用的小补丁（按性价比排序，都不需新架构）
 

@@ -1,0 +1,41 @@
+{
+  "permissionReviewLog": true,
+  "permission": {
+    "*": "allow",
+    "path": {
+      "*": "allow",
+      "*.env": "deny",
+      "*.env.*": "deny"
+    },
+    "write": "deny",
+    "edit": "deny",
+    "bash": {
+      "*": "deny"
+    },
+    "external_directory": "deny",
+    "skill": {
+      "*": "deny",
+      "sisyphus": "allow"
+    },
+    "mcp": {
+      "*": "deny",
+      "mcp_status": "allow",
+      "mcp_list": "allow",
+      "mcp_search": "allow",
+      "mcp_describe": "allow",
+      "mcp_connect": "allow",
+      "sisyphus:query_context": "allow",
+      "sisyphus_query_context": "allow",
+      "sisyphus:today_actions": "allow",
+      "sisyphus_today_actions": "allow",
+      "sisyphus:list_captures": "allow",
+      "sisyphus_list_captures": "allow",
+      "sisyphus:search_knowledge": "allow",
+      "sisyphus_search_knowledge": "allow",
+      "sisyphus:list_knowledge": "allow",
+      "sisyphus_list_knowledge": "allow",
+      "sisyphus:list_monitored_apps": "allow",
+      "sisyphus_list_monitored_apps": "allow"
+    }
+  }
+}

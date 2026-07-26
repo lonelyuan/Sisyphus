@@ -161,4 +161,3 @@ pub fn ensure_starter_categories(dir: &Path) {
 "#;
     let _ = std::fs::write(&p, starter);
 }
-

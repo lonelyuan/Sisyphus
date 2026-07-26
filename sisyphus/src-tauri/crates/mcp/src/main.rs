@@ -144,6 +144,67 @@ pub struct RemoveMonitoredReq {
     pub id: String,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CreateDetectionRuleReq {
+    /// 规则名（展示用），如 "少打游戏" / "夜间刷视频提醒"
+    pub name: String,
+    /// 声明式触发条件对象。字段：category_prefix?（分类前缀，如 "entertainment.game"）、
+    /// category_in?（精确分类数组）、app_in?（包名/bundle id 数组）、window_minutes?（统计窗口，默认 30）、
+    /// min_minutes_in_window（阈值分钟，必填正数）、requires_active_goal?（默认 true）、
+    /// time_of_day?（{from:"HH:MM",to:"HH:MM"} 本地时段，支持跨午夜）。至少要有一个 category/app 作用域。
+    pub trigger: serde_json::Value,
+    /// 可选响应策略对象。默认 {"policy":"immediate","kind":"notify"}。
+    /// 可选：{"policy":"immediate","kind":"pet_message"} / {"policy":"deferred","after_ms":600000} /
+    /// {"policy":"debounce","window_ms":2700000,"dedup_key":"..."} / {"policy":"suppress"}。
+    #[serde(default)]
+    pub response: Option<serde_json::Value>,
+    /// medium | high（默认 medium）。
+    #[serde(default)]
+    pub severity: Option<String>,
+    /// 冷却分钟数（同规则两次提醒最小间隔），默认 30。
+    #[serde(default)]
+    pub cooldown_minutes: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SetRuleEnabledReq {
+    /// 规则 id
+    pub id: String,
+    /// true=启用，false=停用
+    pub enabled: bool,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RuleIdReq {
+    /// 规则 id
+    pub id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpsertLifeIndexReq {
+    /// 分区，如 "今日焦点" / "长期目标" / "研究问题" / "个人发展"
+    pub section: String,
+    /// 卡片标题（同 section+title 视为同一张卡，幂等更新）
+    pub title: String,
+    /// 卡片正文（Markdown / 纯文本）
+    pub body: String,
+    /// 来源溯源：Notion page id 或 URL（可选）
+    #[serde(default)]
+    pub source_ref: Option<String>,
+    /// 外部源更新时间 epoch ms（可选）
+    #[serde(default)]
+    pub source_updated_at: Option<i64>,
+    /// 分区内排序（越小越靠前），默认 0
+    #[serde(default)]
+    pub sort_order: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct LifeIndexIdReq {
+    /// 卡片 id
+    pub id: String,
+}
+
 // ── Server ────────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -153,6 +214,10 @@ pub struct SisyphusServer {
     vault_dir: PathBuf,
     user_id: String,
     device_id: String,
+    /// 完全只读：所有写工具禁用（主动推荐模式）。
+    read_only: bool,
+    /// 仅看板可写：除 lifeindex 工具外的写工具禁用（lifeindex_refresh 模式）。
+    lifeindex_only: bool,
 }
 
 #[tool_router]
@@ -160,7 +225,11 @@ impl SisyphusServer {
     #[tool(
         description = "记录一句自然语言（目标/想法/待办/情绪）到 Sisyphus 的事件日志。零压记录入口，返回 capture_id。"
     )]
-    fn capture(&self, Parameters(CaptureReq { text }): Parameters<CaptureReq>) -> Result<String, String> {
+    fn capture(
+        &self,
+        Parameters(CaptureReq { text }): Parameters<CaptureReq>,
+    ) -> Result<String, String> {
+        self.ensure_writable()?;
         let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
         let id = sisyphus_core::capture_text(&conn, &self.user_id, &self.device_id, &text)
             .map_err(|e| e.to_string())?;
@@ -185,7 +254,11 @@ impl SisyphusServer {
     }
 
     #[tool(description = "设置/更新今日目标。同一天重复调用视为修改。返回 goal id。")]
-    fn set_goal(&self, Parameters(SetGoalReq { text }): Parameters<SetGoalReq>) -> Result<String, String> {
+    fn set_goal(
+        &self,
+        Parameters(SetGoalReq { text }): Parameters<SetGoalReq>,
+    ) -> Result<String, String> {
+        self.ensure_writable()?;
         let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
         let id = sisyphus_core::context::set_goal(&conn, &text).map_err(|e| e.to_string())?;
         Ok(format!("goal set: {id}"))
@@ -200,7 +273,8 @@ impl SisyphusServer {
     ) -> Result<String, String> {
         let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
         let unproc = unprocessed.unwrap_or(true);
-        let v = sisyphus_core::artifacts::list_captures(&conn, unproc, 20).map_err(|e| e.to_string())?;
+        let v = sisyphus_core::artifacts::list_captures(&conn, unproc, 20)
+            .map_err(|e| e.to_string())?;
         serde_json::to_string_pretty(&v).map_err(|e| format!("序列化失败: {e}"))
     }
 
@@ -214,6 +288,7 @@ impl SisyphusServer {
             candidates,
         }): Parameters<ProposeIntentsReq>,
     ) -> Result<String, String> {
+        self.ensure_writable()?;
         let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
         let batch: Vec<(String, serde_json::Value, f64)> = candidates
             .into_iter()
@@ -235,6 +310,7 @@ impl SisyphusServer {
         &self,
         Parameters(AcceptIntentReq { intent_id, edits }): Parameters<AcceptIntentReq>,
     ) -> Result<String, String> {
+        self.ensure_writable()?;
         let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
         let edits_s = edits.map(|v| v.to_string());
         let id = sisyphus_core::artifacts::accept_intent(&conn, &intent_id, edits_s.as_deref())?;
@@ -246,6 +322,7 @@ impl SisyphusServer {
         &self,
         Parameters(IntentIdReq { intent_id }): Parameters<IntentIdReq>,
     ) -> Result<String, String> {
+        self.ensure_writable()?;
         let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
         sisyphus_core::artifacts::ignore_intent(&conn, &intent_id).map_err(|e| e.to_string())?;
         Ok("ignored".to_string())
@@ -260,13 +337,15 @@ impl SisyphusServer {
         &self,
         Parameters(IngestDocumentReq { content, title }): Parameters<IngestDocumentReq>,
     ) -> Result<String, String> {
+        self.ensure_writable()?;
         let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
         let text = match &title {
             Some(t) if !t.is_empty() => format!("[素材] {t}\n{content}"),
             _ => format!("[素材] {content}"),
         };
-        let id = sisyphus_core::ingest::capture_material(&conn, &self.user_id, &self.device_id, &text)
-            .map_err(|e| e.to_string())?;
+        let id =
+            sisyphus_core::ingest::capture_material(&conn, &self.user_id, &self.device_id, &text)
+                .map_err(|e| e.to_string())?;
         Ok(format!("doc_id: {id}"))
     }
 
@@ -284,6 +363,7 @@ impl SisyphusServer {
             folder,
         }): Parameters<WriteKnowledgeNoteReq>,
     ) -> Result<String, String> {
+        self.ensure_writable()?;
         let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
         let note = sisyphus_core::vault::VaultNote {
             title,
@@ -315,6 +395,7 @@ impl SisyphusServer {
             source_type,
         }): Parameters<SaveSourceReq>,
     ) -> Result<String, String> {
+        self.ensure_writable()?;
         let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
         let out = sisyphus_core::sources::save_source(
             &conn,
@@ -335,7 +416,8 @@ impl SisyphusServer {
         Parameters(SearchKnowledgeReq { query }): Parameters<SearchKnowledgeReq>,
     ) -> Result<String, String> {
         let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
-        let v = sisyphus_core::knowledge::search_knowledge(&conn, &query).map_err(|e| e.to_string())?;
+        let v =
+            sisyphus_core::knowledge::search_knowledge(&conn, &query).map_err(|e| e.to_string())?;
         serde_json::to_string_pretty(&v).map_err(|e| format!("序列化失败: {e}"))
     }
 
@@ -353,6 +435,7 @@ impl SisyphusServer {
         &self,
         Parameters(DeleteNoteReq { title }): Parameters<DeleteNoteReq>,
     ) -> Result<String, String> {
+        self.ensure_writable()?;
         let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
         let out = sisyphus_core::knowledge::delete_knowledge_note(
             &conn,
@@ -382,12 +465,14 @@ impl SisyphusServer {
         &self,
         Parameters(AddMonitoredReq { id, category }): Parameters<AddMonitoredReq>,
     ) -> Result<String, String> {
+        self.ensure_writable()?;
         let id = id.trim();
         if id.is_empty() {
             return Err("id 不能为空".into());
         }
         let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
-        sisyphus_core::category::add_monitored_app(&conn, id, &category).map_err(|e| e.to_string())?;
+        sisyphus_core::category::add_monitored_app(&conn, id, &category)
+            .map_err(|e| e.to_string())?;
         Ok(format!("monitoring: {id} -> {category}"))
     }
 
@@ -396,9 +481,123 @@ impl SisyphusServer {
         &self,
         Parameters(RemoveMonitoredReq { id }): Parameters<RemoveMonitoredReq>,
     ) -> Result<String, String> {
+        self.ensure_writable()?;
         let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
         sisyphus_core::category::remove_monitored_app(&conn, &id).map_err(|e| e.to_string())?;
         Ok("removed".to_string())
+    }
+
+    // ── 动态检测规则（西西弗斯计划：一句话建规则）─────────────────────────────
+
+    #[tool(
+        description = "列出所有检测规则（含启用状态、trigger/response、冷却），返回 JSON。改/建规则前先看它，避免重复。"
+    )]
+    fn list_detection_rules(&self) -> Result<String, String> {
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let v = sisyphus_core::rules::list_rules(&conn).map_err(|e| e.to_string())?;
+        serde_json::to_string_pretty(&v).map_err(|e| format!("序列化失败: {e}"))
+    }
+
+    #[tool(
+        description = "把用户口述的“什么情况提醒我”落成一条检测规则：声明式 trigger（category_prefix/category_in/app_in + window_minutes + min_minutes_in_window + requires_active_goal + 可选 time_of_day）+ 可选 response 策略。命中后端侧自动干预（通知/宠物气泡）。建前先 list_detection_rules 看有无重复；trigger 至少含一个 category/app 作用域。返回规则 id。"
+    )]
+    fn create_detection_rule(
+        &self,
+        Parameters(CreateDetectionRuleReq {
+            name,
+            trigger,
+            response,
+            severity,
+            cooldown_minutes,
+        }): Parameters<CreateDetectionRuleReq>,
+    ) -> Result<String, String> {
+        self.ensure_writable()?;
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let trigger_s = trigger.to_string();
+        let response_s = response.map(|v| v.to_string());
+        let id = sisyphus_core::rules::create_rule(
+            &conn,
+            &name,
+            &trigger_s,
+            response_s.as_deref(),
+            severity.as_deref().unwrap_or("medium"),
+            cooldown_minutes.unwrap_or(30),
+            "agent",
+            None,
+        )?;
+        Ok(format!("rule created: {id}"))
+    }
+
+    #[tool(description = "启用 / 停用一条检测规则。")]
+    fn set_detection_rule_enabled(
+        &self,
+        Parameters(SetRuleEnabledReq { id, enabled }): Parameters<SetRuleEnabledReq>,
+    ) -> Result<String, String> {
+        self.ensure_writable()?;
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        sisyphus_core::rules::set_rule_enabled(&conn, &id, enabled).map_err(|e| e.to_string())?;
+        Ok(if enabled { "enabled" } else { "disabled" }.to_string())
+    }
+
+    #[tool(description = "删除一条检测规则。")]
+    fn delete_detection_rule(
+        &self,
+        Parameters(RuleIdReq { id }): Parameters<RuleIdReq>,
+    ) -> Result<String, String> {
+        self.ensure_writable()?;
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        sisyphus_core::rules::delete_rule(&conn, &id).map_err(|e| e.to_string())?;
+        Ok("deleted".to_string())
+    }
+
+    // ── 人生看板 LifeIndex（看齐 Notion 的本地投影）─────────────────────────────
+
+    #[tool(
+        description = "列出人生看板全部卡片（按分区排序），返回 JSON。刷新看板前先看它，避免重复。"
+    )]
+    fn list_lifeindex(&self) -> Result<String, String> {
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let v = sisyphus_core::lifeindex::list_cards(&conn).map_err(|e| e.to_string())?;
+        serde_json::to_string_pretty(&v).map_err(|e| format!("序列化失败: {e}"))
+    }
+
+    #[tool(
+        description = "写/更新人生看板的一张卡片（按 section+title 幂等）。用法：只读参考用户 Notion + query_context 后，把「长期目标/今日焦点/研究问题/个人发展」等提炼成卡片写到本地看板。source_ref 填 Notion 溯源。绝不回写 Notion。返回卡片 id。"
+    )]
+    fn upsert_lifeindex_card(
+        &self,
+        Parameters(UpsertLifeIndexReq {
+            section,
+            title,
+            body,
+            source_ref,
+            source_updated_at,
+            sort_order,
+        }): Parameters<UpsertLifeIndexReq>,
+    ) -> Result<String, String> {
+        self.ensure_lifeindex_writable()?;
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let id = sisyphus_core::lifeindex::upsert_card(
+            &conn,
+            &section,
+            &title,
+            &body,
+            source_ref.as_deref(),
+            source_updated_at,
+            sort_order.unwrap_or(0),
+        )?;
+        Ok(format!("lifeindex card: {id}"))
+    }
+
+    #[tool(description = "删除人生看板的一张卡片。")]
+    fn delete_lifeindex_card(
+        &self,
+        Parameters(LifeIndexIdReq { id }): Parameters<LifeIndexIdReq>,
+    ) -> Result<String, String> {
+        self.ensure_lifeindex_writable()?;
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        sisyphus_core::lifeindex::delete_card(&conn, &id).map_err(|e| e.to_string())?;
+        Ok("deleted".to_string())
     }
 }
 
@@ -419,6 +618,7 @@ impl ServerHandler for SisyphusServer {
                  today_actions 取今日最小行动；set_goal 设今日目标。\
                  第二大脑：ingest_document 收素材 → 你阅读加工 → write_knowledge_note 写概念卡片到 Obsidian 知识库（[[wikilink]] 关联）；search_knowledge/list_knowledge 检索；delete_note 删卡（合并碎卡后清冗余）。\
                  西西弗斯计划（拖延干预）：add_monitored_app 把某娱乐 app 纳入监控 + set_goal 设目标，用户超时刷它时端侧自动弹干预；list_monitored_apps 查名单。\
+                 想“盯住某类行为/新场景”时用 create_detection_rule 把用户口述落成检测规则（声明式 trigger + response），list/set_enabled/delete_detection_rule 管理。\
                  语气：关心不评判、只提最小下一步、引用真实数据。"
                     .to_string(),
             ),
@@ -428,6 +628,23 @@ impl ServerHandler for SisyphusServer {
 }
 
 impl SisyphusServer {
+    fn ensure_writable(&self) -> Result<(), String> {
+        if self.read_only || self.lifeindex_only {
+            Err("当前 Sisyphus MCP 以只读模式运行；智能体不能修改用户内容或本地状态".to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// 看板写门禁：完全只读时禁用；lifeindex_only 或完全可写时放行。
+    fn ensure_lifeindex_writable(&self) -> Result<(), String> {
+        if self.read_only {
+            Err("当前 Sisyphus MCP 以只读模式运行；不能更新看板".to_string())
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn new() -> anyhow::Result<Self> {
         let path = db_path();
         if let Some(parent) = path.parent() {
@@ -441,12 +658,19 @@ impl SisyphusServer {
         // 跨进程并发：与 Tauri App 同开一库，WAL + busy_timeout 处理写争用。
         conn.busy_timeout(Duration::from_secs(5))
             .map_err(|e| anyhow::anyhow!("busy_timeout: {e}"))?;
+        let env_flag = |k: &str| {
+            std::env::var(k)
+                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+                .unwrap_or(false)
+        };
         Ok(Self {
             tool_router: Self::tool_router(),
             db: Arc::new(Mutex::new(conn)),
             vault_dir: vault_path(),
             user_id: "local-user".to_string(),
             device_id: "agent-mcp".to_string(),
+            read_only: env_flag("SISYPHUS_READ_ONLY"),
+            lifeindex_only: env_flag("SISYPHUS_LIFEINDEX_ONLY"),
         })
     }
 }

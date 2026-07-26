@@ -73,6 +73,7 @@ pub extern "system" fn Java_com_sisyphus_collector_NativeBridge_evaluate<'local>
             current_app: opt(pkg),
             current_category: category,
             active_entertainment_ms: active_ms,
+            active_session_ms: active_ms,
             media_playing_since_ms: 0,
             recent_scroll_count: 0,
             today_goal: goal,

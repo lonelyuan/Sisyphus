@@ -117,9 +117,25 @@ total_ms = closed_ms_from_db + active_entertainment_ms
 
 ## 新增规则
 
-1. 在 `app/src-tauri/src/rule_engine/rules/` 添加新 `.rs` 文件，实现 `Rule` trait
-2. 在 `RuleEngine::new()` 的 `rules` 列表中注册
-3. 在本文档登记规则 ID、版本、触发条件
+有两条路径：
+
+### A. 动态规则（数据驱动，首选）——“用户一句话建规则”
+
+大多数“盯住某类行为”的需求不需要写代码。用户/智能体用自然语言描述，落成一条 `detection_rules`（声明式 `trigger_json` + `response_json`），`RuleEngine::evaluate` **每次评估热加载**启用规则，无需重编。
+
+- 存储：`detection_rules` 表（见 [local-storage.md](local-storage.md)）。
+- 解释器：`core::rules::DynamicRule`（实现 `Rule` trait），字段泛化自 `EntertainmentSessionRule`。
+- 声明式 `trigger`：`category_prefix` / `category_in` / `app_in`（作用域，至少一项）、`window_minutes`、`min_minutes_in_window`（阈值）、`requires_active_goal`、`time_of_day`（本地时段，支持跨午夜）。
+- `response`：[`ResponsePolicy`](proactive-triggers.md#3-规则引擎的响应策略核心可拓展点) —— `immediate`(notify/pet_message) / `deferred` / `debounce` / `suppress`。
+- 工具面：MCP `create_detection_rule` / `list_detection_rules` / `set_detection_rule_enabled` / `delete_detection_rule`（可写门禁）；同名 Tauri 命令供 Settings 规则列表。skill 指引见 `skills/sisyphus/references/rules.md`。两个基座（Pi / Codex）共用同一 MCP 工具。
+
+### B. 内置 Rust 规则（复杂/高频逻辑）
+
+需要跨字段复杂判定或高频优化时，仍可写原生规则：
+
+1. 在 `crates/core/src/rule_engine/` 添加实现 `Rule` trait 的类型。
+2. 在 `RuleEngine::new()` 注册。
+3. 在本文档登记规则 ID、版本、触发条件。
 
 ### 预留规则（v1.1）
 

@@ -5,7 +5,7 @@ MCP 工具面（`sisyphus` server）完整签名与用法。所有工具即使�
 ## 通用
 
 - `capture(text)` → `captured: <event_id>`。**任何输入先调它**。返回的 event_id 用于 `propose_intents`。
-- `list_captures(unprocessed?=true)` → `[{event_id, text, created_at}]`。收件箱；`unprocessed=true` 只列还没生成候选的。
+- `list_captures(unprocessed?=true)` → `[{event_id, text, created_at}]`。本地待处理记录；`unprocessed=true` 只列还没生成候选的。它不是 Notion Inbox。
 - `query_context()` → `{date, goal, entertainment_minutes, intervention_count, open_tasks[], due_reminders[], recent_interventions[]}`。规划/复盘前先调。
 - `today_actions()` → `["…"]`（1–3 条）。
 

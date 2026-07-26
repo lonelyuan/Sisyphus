@@ -1,7 +1,8 @@
 //! 主动触发：待办动作队列（[docs/spec/proactive-triggers.md](../../../../../docs/spec/proactive-triggers.md)）。
 //!
 //! **core 只做纯数据逻辑**：入队 / 取到期 / 标状态 / 周期重排。纯 `rusqlite`、无副作用，安卓可编。
-//! 副作用（弹通知 / 拉起 codex / 回写 Notion）由 **app 层**按 `kind` 派发——tokio/进程/通知绝不进 core。
+//! 副作用（弹通知 / 宠物展示 / 拉起 codex）由 **app 层**按 `kind` 派发；外部内容源只读。
+//! tokio/进程/通知绝不进 core。
 //!
 //! 心智：一条队列，`due_at_ms = now` 即"立即"，`= now+Δ` 即"延后"，同一条路径。
 
@@ -139,7 +140,11 @@ fn set_status(conn: &Connection, id: &str, status: &str) -> Result<(), String> {
 /// 周期动作触发后排下一次：按 `action.recurrence` 算出**严格晚于 now** 的下一次 `due_at`，
 /// 复制 kind/payload/recurrence/dedup_key/created_by 入队一条新的 pending。非周期或无法解析则不排、返回 `None`。
 /// MVP 只支持 `"daily@HH:MM"`（本地时区）。
-pub fn reschedule(conn: &Connection, action: &ScheduledAction, now: i64) -> Result<Option<String>, String> {
+pub fn reschedule(
+    conn: &Connection,
+    action: &ScheduledAction,
+    now: i64,
+) -> Result<Option<String>, String> {
     let rec = match &action.recurrence {
         Some(r) => r,
         None => return Ok(None),

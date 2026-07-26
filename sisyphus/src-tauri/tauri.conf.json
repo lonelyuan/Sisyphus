@@ -10,11 +10,29 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
+        "label": "main",
         "title": "sisyphus",
-        "width": 800,
-        "height": 600
+        "width": 1120,
+        "height": 760,
+        "minWidth": 720,
+        "minHeight": 560
+      },
+      {
+        "label": "pet",
+        "url": "index.html",
+        "width": 160,
+        "height": 160,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "shadow": false,
+        "resizable": false,
+        "visible": false,
+        "title": "sisyphus-pet"
       }
     ],
     "security": {
@@ -24,6 +42,10 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "../../skills": "skills",
+      "../scripts": "scripts"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

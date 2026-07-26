@@ -1,8 +1,8 @@
 // 本地 SQLite 管理（rusqlite）
 // schema 与 packages/protocol/SPEC.md 一致，字段命名 snake_case。
 
-use rusqlite::{Connection, Result, params};
 use crate::rule_engine::DailyGoal;
+use rusqlite::{params, Connection, Result};
 
 pub fn open(path: &str) -> Result<Connection> {
     let conn = Connection::open(path)?;
@@ -24,6 +24,47 @@ pub fn sum_entertainment_ms(conn: &Connection, user_id: &str, since_ms: i64) -> 
         params![user_id, since_ms],
         |r| r.get(0),
     )
+}
+
+/// 窗口内匹配指定分类 / app 的已闭合前台会话总时长（ms）。供动态规则通用统计：
+/// 分类维度 = (category LIKE prefix%) OR (category IN categories)；再 AND (entity IN apps)。
+/// 三者皆空则不加分类/应用过滤（统计全部前台）。防漏算的进行中会话由调用方另行补入。
+pub fn sum_foreground_ms(
+    conn: &Connection,
+    user_id: &str,
+    since_ms: i64,
+    category_prefix: Option<&str>,
+    categories: &[String],
+    apps: &[String],
+) -> Result<i64> {
+    use rusqlite::types::Value;
+    let mut sql = String::from(
+        "SELECT COALESCE(SUM(end_time - start_time), 0) FROM raw_events \
+         WHERE user_id = ? AND layer = 'raw' AND type = 'app_foreground' \
+           AND start_time >= ? AND end_time IS NOT NULL",
+    );
+    let mut binds: Vec<Value> = vec![Value::Text(user_id.to_string()), Value::Integer(since_ms)];
+
+    let mut cat_clauses: Vec<String> = Vec::new();
+    if let Some(prefix) = category_prefix.filter(|p| !p.is_empty()) {
+        cat_clauses.push("category LIKE ?".to_string());
+        binds.push(Value::Text(format!("{prefix}%")));
+    }
+    if !categories.is_empty() {
+        let ph = vec!["?"; categories.len()].join(",");
+        cat_clauses.push(format!("category IN ({ph})"));
+        binds.extend(categories.iter().map(|c| Value::Text(c.clone())));
+    }
+    if !cat_clauses.is_empty() {
+        sql.push_str(&format!(" AND ({})", cat_clauses.join(" OR ")));
+    }
+    if !apps.is_empty() {
+        let ph = vec!["?"; apps.len()].join(",");
+        sql.push_str(&format!(" AND entity IN ({ph})"));
+        binds.extend(apps.iter().map(|a| Value::Text(a.clone())));
+    }
+
+    conn.query_row(&sql, rusqlite::params_from_iter(binds), |r| r.get(0))
 }
 
 /// 查询指定日期的今日目标（取最新一条 planned/started）。
@@ -75,11 +116,7 @@ pub fn insert_intervention(
 }
 
 /// 记录用户对干预通知的响应。
-pub fn update_intervention_response(
-    conn: &Connection,
-    id: &str,
-    action: &str,
-) -> Result<()> {
+pub fn update_intervention_response(conn: &Connection, id: &str, action: &str) -> Result<()> {
     let now_ms = chrono::Utc::now().timestamp_millis();
     conn.execute(
         "UPDATE interventions SET user_response = ?1, responded_at = ?2 WHERE id = ?3",
@@ -95,23 +132,21 @@ pub fn is_cooldown_ready(
     now_ms: i64,
     cooldown_ms: i64,
 ) -> Result<bool> {
-    let last: Option<i64> = conn.query_row(
-        "SELECT MAX(shown_at) FROM interventions WHERE rule_id = ?1",
-        params![rule_id],
-        |r| r.get(0),
-    ).or_else(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => Ok(None),
-        other => Err(other),
-    })?;
+    let last: Option<i64> = conn
+        .query_row(
+            "SELECT MAX(shown_at) FROM interventions WHERE rule_id = ?1",
+            params![rule_id],
+            |r| r.get(0),
+        )
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })?;
     Ok(last.map_or(true, |t| now_ms - t > cooldown_ms))
 }
 
 /// 今日娱乐总时长（ms），含活跃会话。
-pub fn today_entertainment_ms(
-    conn: &Connection,
-    user_id: &str,
-    date_start_ms: i64,
-) -> Result<i64> {
+pub fn today_entertainment_ms(conn: &Connection, user_id: &str, date_start_ms: i64) -> Result<i64> {
     sum_entertainment_ms(conn, user_id, date_start_ms)
 }
 
@@ -170,9 +205,24 @@ pub fn insert_behavior_event(
           parent_event_ids, privacy_level, produced_at, ingested_at)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
         params![
-            event_id, user_id, device_id, seq_no, source, layer, event_type, time_mode,
-            event_time, start_time, end_time, entity, category, payload_json,
-            parent_event_ids_json, privacy_level, produced_at, now_ms
+            event_id,
+            user_id,
+            device_id,
+            seq_no,
+            source,
+            layer,
+            event_type,
+            time_mode,
+            event_time,
+            start_time,
+            end_time,
+            entity,
+            category,
+            payload_json,
+            parent_event_ids_json,
+            privacy_level,
+            produced_at,
+            now_ms
         ],
     )?;
     Ok(())
@@ -235,6 +285,8 @@ CREATE INDEX IF NOT EXISTS idx_raw_user_layer_time
     ON raw_events (user_id, layer, COALESCE(start_time, event_time) DESC);
 CREATE INDEX IF NOT EXISTS idx_raw_user_category
     ON raw_events (user_id, category) WHERE category IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_raw_timeline_time
+    ON raw_events (COALESCE(start_time, event_time, produced_at));
 CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_device_seq
     ON raw_events (device_id, seq_no);
 
@@ -261,6 +313,7 @@ CREATE TABLE IF NOT EXISTS interventions (
     responded_at    INTEGER,
     outcome         TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_interventions_shown ON interventions (shown_at);
 
 -- ── 反思平面 Artifact store（Phase 1.2：原声笔记）────────────────────────────
 -- 铁律：每种有状态对象各自建表，禁止多态大表。intent_candidates 是 capture→artifact
@@ -346,10 +399,10 @@ CREATE TABLE IF NOT EXISTS monitored_apps (
 -- ── 主动触发：待办动作队列（proactive-triggers.md §2）───────────────────────
 -- 统一"到点要做的动作"：时间触发的周期任务、规则引擎的立即/延后响应、agent 排程都塞这里。
 -- due_at_ms=now 即"立即"；=now+Δ 即"延后"。core 只管队列增删查（纯数据、安卓可编）；
--- 副作用（弹通知/拉 codex/回写 Notion）由 app 层按 kind 派发。
+-- 副作用（弹通知/宠物展示/拉 codex）由 app 层按 kind 派发；外部内容源只读。
 CREATE TABLE IF NOT EXISTS scheduled_actions (
     id              TEXT PRIMARY KEY,
-    kind            TEXT NOT NULL,               -- notify|agent_run|notion_now|notion_inbox|…
+    kind            TEXT NOT NULL,               -- notify|pet_message|agent_run|…
     payload_json    TEXT NOT NULL DEFAULT '{}',
     due_at_ms       INTEGER NOT NULL,
     recurrence      TEXT,                        -- NULL=一次性；如 "daily@09:00"
@@ -361,4 +414,41 @@ CREATE TABLE IF NOT EXISTS scheduled_actions (
     fired_at_ms     INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_sched_due ON scheduled_actions (status, due_at_ms);
+
+-- ── 动态检测规则（rule-engine.md）──────────────────────────────────────────────
+-- 用户/智能体用一句话建的检测规则：声明式 trigger_json（泛化 EntertainmentSessionRule）
+-- + response_json（ResponsePolicy）。RuleEngine 每次评估热加载 enabled 行，无需重编。
+CREATE TABLE IF NOT EXISTS detection_rules (
+    id                TEXT PRIMARY KEY,
+    name              TEXT NOT NULL,
+    enabled           INTEGER NOT NULL DEFAULT 1,
+    trigger_json      TEXT NOT NULL,               -- 声明式触发条件（见 core::rules::RuleTrigger）
+    response_json     TEXT NOT NULL DEFAULT '{"policy":"immediate","kind":"notify"}',
+    severity          TEXT NOT NULL DEFAULT 'medium', -- medium | high
+    cooldown_minutes  INTEGER NOT NULL DEFAULT 30,
+    created_by        TEXT NOT NULL DEFAULT 'agent',  -- agent | user
+    origin_capture_id TEXT,                         -- 溯源：哪条 capture 催生的
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_detection_rules_enabled ON detection_rules (enabled);
+
+-- ── 人生看板 LifeIndex（notion-integration.md）───────────────────────────────
+-- 看板内容看齐 Notion：智能体只读参考 Notion + 本地上下文后写这张表。可重建投影，
+-- 非真相源；Notion 由用户编辑、智能体绝不回写。按 (section,title) 幂等 upsert。
+CREATE TABLE IF NOT EXISTS lifeindex_cards (
+    id                TEXT PRIMARY KEY,
+    section           TEXT NOT NULL,              -- 分区，如 今日焦点 / 长期目标 / 研究问题
+    title             TEXT NOT NULL,
+    body              TEXT NOT NULL DEFAULT '',
+    source_ref        TEXT,                       -- Notion page id / url 溯源
+    source_updated_at INTEGER,                    -- 外部源更新时间
+    observed_at       INTEGER NOT NULL,           -- 本轮刷新观测时间（mark-and-sweep 用）
+    status            TEXT NOT NULL DEFAULT 'active', -- active | archived
+    sort_order        INTEGER NOT NULL DEFAULT 0,
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL,
+    UNIQUE(section, title)
+);
+CREATE INDEX IF NOT EXISTS idx_lifeindex_status ON lifeindex_cards (status, section);
 "#;

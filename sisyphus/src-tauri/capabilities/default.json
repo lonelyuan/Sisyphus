@@ -8,6 +8,7 @@
     "opener:default",
     "opener:allow-reveal-item-in-dir",
     "notification:default",
-    "os:default"
+    "os:default",
+    "log:default"
   ]
 }

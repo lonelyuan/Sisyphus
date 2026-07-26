@@ -23,6 +23,7 @@ description: 你的一站式个人助手入口。把任何一句想法丢给它�
 | 要记住的事实 / 一篇文章 / 链接 / 想学的主题 | **知识** | `capture` 收下 → 你加工出 5 行内摘要 + 3–10 个概念 → `write_knowledge_note`（`links` 用 `[[wikilink]]` 关联已有卡片，`sources` 填来源）。想系统深研某主题，见 routing.md 的 knowledge-agent 派发。 |
 | 具体待办 / “提醒我 X” / 有时间点的事 | **任务 / 提醒** | `capture` → `propose_intents(capture_event_id, [{kind:"task"或"reminder", proposed:{…}}])` → 复述确认 → `accept_intent`。**提醒必须给 `remind_at_ms`（真实 epoch 毫秒）**，到点端侧自动弹通知。 |
 | 想改的习惯 / “少刷 X” / “戒 X” / 今天要专注做的事 | **习惯 / 目标** | `set_goal(今日目标)`；若涉及沉迷某 app → `add_monitored_app(包名, "entertainment.video/game/social/news")` 纳入监控。之后用户设了目标又超时刷它，西西弗斯会在**端侧自动弹干预**。 |
+| “帮我盯着 X” / “我一到 X 就停不下来” / 想自定义触发条件（特定时段/阈值/分类） | **检测规则** | `create_detection_rule(name, trigger, response?)` 把口述落成声明式规则，命中即端侧自动干预。schema、response 策略与例子见 [references/rules.md](references/rules.md)。 |
 | 情绪 / 吐槽 / 只是想说说 | **情绪** | 只 `capture` + 共情一句；晚间复盘时引用，不强行落 artifact。 |
 
 一条输入常跨多类，例：“看到篇讲专注力的文章挺好，我最近老是刷手机学不进去” = 知识（存文章）+ 习惯（设专注目标 + 监控手机娱乐 app）。
@@ -33,13 +34,18 @@ description: 你的一站式个人助手入口。把任何一句想法丢给它�
 - “周五前把季度报告初稿发出去” → `capture` → `propose_intents(…, [{kind:"task", proposed:{title:"发季度报告初稿", due_ms:<周五 epoch>}}])` → 确认 → `accept_intent`。
 - “晚上 9 点提醒我吃药” → `propose_intents(…, [{kind:"reminder", proposed:{text:"吃药", remind_at_ms:<今晚 21 点 epoch>}}])` → `accept_intent` → 到点弹通知。
 - “我抖音刷太多了想少刷” → `set_goal("今天少刷抖音，专注 X")` + `add_monitored_app("com.ss.android.ugc.aweme", "entertainment.video")`；回一句：设好了，超时刷抖音时西西弗斯会提醒你。
+- “我一到晚上就打游戏停不下来，帮我盯着” → `create_detection_rule("夜间游戏", {"category_prefix":"entertainment.game","time_of_day":{"from":"20:00","to":"02:00"},"window_minutes":30,"min_minutes_in_window":20,"requires_active_goal":false})`；复述确认触发条件。见 [references/rules.md](references/rules.md)。
 - “今天啥都不想干，只想躺着” → `capture` + 共情 + 只提“先做今天最小的一件事，5 分钟就好”。
 
 ## 每日例程（模式）
 
-- **今日规划（morning-plan）**：`query_context` 看现状（目标 / 娱乐时长 / 未完成任务 / 到期提醒）→ 结合 `list_captures` 里未处理的 → 提 **1 个**今日最小目标 → `set_goal`。
+- **今日规划（morning-plan）**：`query_context` 看本地现状（目标 / 娱乐时长 / 未完成任务 / 到期提醒）→ 若已配置只读 Notion 上下文源，刷新并读取用户最近更新 → 结合 `list_captures` 里未处理的 → 提 **1 个**今日最小目标 → `set_goal`。Notion 全程只读。
 - **晚间复盘（evening-review）**：`query_context` 看目标进度、娱乐时长、干预次数 → 关心式总结（不羞辱）→ 引导用户口述遗留想法，逐条 `capture`（供明天引用）。
-- **处理收件箱**：`list_captures(unprocessed=true)` → 逐条走上面的意图路由。
+- **处理本地未分类记录**：`list_captures(unprocessed=true)` → 逐条走上面的意图路由。它不是 Notion Inbox；不要在 Notion 创建或维护 Inbox / NOW /“下一项”。
+
+主动推荐由定时器 / 行为规则拉起：刷新只读 Notion 上下文 + `query_context` → 只返回 **1 条**适合当下的建议或 `no_recommendation` → 由宿主推给宠物 / 系统通知。智能体不得 append、勾选或修改任何 Notion 内容。
+
+**Notion 只读工具面**：若用户在设置页配置了 integration token，你会直接看到官方 `notion-mcp-server` 的工具（如 search/fetch 类），照常调用即可。只读边界由 Notion 侧的 integration 权限保证（用户被建议只给 "Read content" 权限）——不要主动尝试任何创建/更新/追加/删除类操作，哪怕工具列表里出现了它们。没看到这些工具，说明用户还没配置，直接说明即可，不要编造"需要审批/没有交互入口"之类的话。
 
 把例程设成每日定时任务的方法，见 [references/install.md](references/install.md)。
 

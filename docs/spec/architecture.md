@@ -30,7 +30,7 @@
 
 - **InputBox（无压力记录）—— 总入口**：兼容跨端输入源（Codex、Notion，后续加西西弗斯 APP 本地输入），把任意一句话原样接住（`capture`）。经**意图识别智能体**（现为 Codex/Claude runtime，后期自建 Agent 底座）做**功能路由**，调对应模块。
 - **模块一 · 狭义西西弗斯（习惯培养 / 对抗拖延）**：采集端 → 行为日志库 → 习惯引擎（规则 / ML）→ 提醒干预端。项目最早的闭环，即感知平面。
-- **模块二 · LifeIndex（人生看板）**：记录短期 Todo、长期目标、个人发展、知识体系、研究问题等一切内容；作为**人与智能体共享的上下文**，与其他模块联动，"看一眼就知道下一步该干什么"。真相在 Notion，见 [notion-integration.md](notion-integration.md)。
+- **模块二 · LifeIndex（人生看板）**：用户按自己的习惯在 Notion 维护短期 Todo、长期目标、个人发展、研究问题等内容；它是主动智能体的一个**只读上下文源**。智能体不维护 Inbox / NOW /“下一项”，只在触发时结合本地状态推理一条临时建议，经宠物或通知展示。见 [notion-integration.md](notion-integration.md)。
 - **模块三 · 第二大脑（知识库 / 知识图谱）**：以 Markdown vault 为存储介质，配调研 / 验证 / 梳理智能体构建个人知识库；后续可派生知识图谱（图数据库）。
 
 > InputBox / 意图识别 / 三模块是**产品组件视图**，不改变 §2 的双存储与 §3 的 `ingest_event` 唯一契约：InputBox = `capture`，意图识别 = `propose_intents`，模块产物落 Artifact store 或 vault。**被动采集不经 InputBox**，直接进狭义西西弗斯（感知平面）。
@@ -68,9 +68,9 @@
 
 - **性质**：人类节奏（对话、每日任务、复盘），自然语言入口。
 - **载体（现在）**：Codex / Claude Code，通过 **MCP 工具** 读写数据层；用它们现成的对话 UI、工具调用循环、定时任务，**不自建 Agent 基座**。
-- **载体（后期）**：迁移到自研 Agent 基座。因为 Agent 只能经 MCP / CLI 碰数据，**换基座只换脸不换脊椎**。
-- **职责**：原声笔记（capture→意图→artifact）、第二大脑（知识加工）、以及拖延模块的对话与复盘。
-- **边界**：Agent **读取**引擎产出（findings、today-context），**不逐拍驱动**引擎。引擎自己常驻自转，Agent 查它的结果。**Agent 是脸，引擎是脊椎。**
+- **载体（后期）**：迁移到自研 Agent 基座。因为 Agent 只能经 MCP / CLI 碰数据，**换基座时只替换这一个交互前端，Core 与 MCP 能力契约不变**。
+- **职责**：原声笔记（capture→意图→artifact）、第二大脑（知识加工）、拖延模块的对话与复盘，以及定时 / 行为触发后基于多源上下文生成一次性主动建议。
+- **边界**：Agent **读取**引擎产出（findings、today-context），**不逐拍驱动**引擎。引擎自己常驻自转，Agent 查它的结果。**引擎是常驻的确定性后端，Agent 是按人类节奏介入的交互前端。**
 
 ---
 
@@ -99,6 +99,17 @@
 > Core 是被后来的第二个垂直"逼"出来、**萃取**出来的，不是提前设计出来的。
 
 一条 capture 事件（进 Event log）经"意图提取"这一步，产出 / 更新某张 Artifact 表——这是两存储之间唯一的桥。
+
+### 2.4 外部信息源镜像（可重建投影）
+
+Notion、日历等用户既有工具不并入 Event log，也不被复制成新的本地任务真相。app / MCP 适配层通过统一只读 `ContextSource` 拉取内容，缓存为带 `source / external_id / source_updated_at / observed_at / hash` 的 `source_snapshots`。
+
+- 用户内容的权威来源仍是原工具；Notion 中全部文档只有用户编辑。
+- `source_snapshots` 只是可丢弃、可重建的读取缓存，不是 Artifact store。
+- 主动任务前刷新启用的信息源，再把镜像与本地 `query_context` 一起交给 agent。
+- 系统只把推荐、投递、反馈和冷却等运行状态写回本地，不反向覆盖外部源。
+
+完整的所有权、权限和降级语义见 [notion-integration.md](notion-integration.md)。
 
 ---
 
@@ -181,7 +192,7 @@ App 侧把数据层能力以 **MCP 工具** 暴露给 Agent（先挂 Codex / Cla
 | 目录 | 角色 | 平面 |
 |---|---|---|
 | `src-tauri/`（workspace 根 + App crate `sisyphus_lib`）| Tauri 桌面/安卓外壳 + 前台采集器，链接 core | 感知 |
-| `src-tauri/crates/core/`（`sisyphus-core` rlib）| **唯一事实来源**：db + `ingest_event` + 查询 + 规则引擎 + 分类 | 数据 + 引擎 |
+| `src-tauri/crates/core/`（`sisyphus-core` rlib）| **本地事件与系统运行状态的事实来源**：db + `ingest_event` + 查询 + 规则引擎 + 分类 | 数据 + 引擎 |
 | `src-tauri/crates/mcp/`（`sisyphus-mcp` bin）| rmcp stdio server，链接 core，反思平面接口 | 反思 |
 | `src/` | React 前端（今日页等） | UI |
 
@@ -209,8 +220,8 @@ Android 采集源以 Kotlin Tauri 插件形式接入 `sisyphus/`，见 [android-
 
 总原则：**敏捷开发、充分复用现成工具，但在架构上保留后续换成自研的可拓展性。**
 
-1. **智能体基座可换**：现阶段用 Codex / Claude Code 作基座，智能体能力一律沉淀为 **skill / MCP / CLI / SDK**；通用智能体亦作前期主入口。后期整体替换为自研 Agent 底座——**换脸不换脊椎**（Core 经 MCP 暴露，见 §4）。
-2. **自建存储 + 生态接入并存**：自建存储架构（SQLite：Event log + Artifact store）是事实边界；同时保持与常用软件生态互通——充分用 **Notion MCP** 保留 Notion 使用习惯（见 [notion-integration.md](notion-integration.md)）；知识库用 **Obsidian Markdown vault**，后续可派生知识图谱（图数据库）。
+1. **智能体基座可换**：现阶段用 Codex / Claude Code 作基座，智能体能力一律沉淀为 **skill / MCP / CLI / SDK**；通用智能体亦作前期主入口。后期整体替换为自研 Agent 底座——**替换的只是交互前端，Core 经 MCP 暴露的能力契约不变**（见 §4）。
+2. **自建存储 + 生态信息源并存**：SQLite 保存本地事件与系统运行状态；用户选择的工具保存用户内容。通过只读 `ContextSource` + 可重建镜像接入 Notion，尊重用户原有习惯，既不要求迁移，也不让 agent 编辑原文（见 [notion-integration.md](notion-integration.md)）；知识库用 **Obsidian Markdown vault**，后续可派生知识图谱（图数据库）。
 3. **先验证，再"真正用起来"**：先验证前期架构可行性，通过后再追求日常可用性与产品形状。
 
 **长期规划暂缓（明确克制，验证期不碰）：**
@@ -231,11 +242,13 @@ Android 采集源以 Kotlin Tauri 插件形式接入 `sisyphus/`，见 [android-
 
 **分层守铁律**：
 - **`sisyphus-core::scheduler`**：队列纯数据逻辑（enqueue / due_actions / mark_fired / reschedule），纯 rusqlite、无副作用，安卓可编。
-- **app（感知平面常驻）**：ticker 到点取 `due_actions` → 按 `kind` 执行**平台相关副作用**（`notify` 弹通知 / `agent_run` 拉起 codex / `notion_*` 白名单回写）。`tokio`/进程/通知**绝不进 core**。
+- **app（感知平面常驻）**：ticker 到点取 `due_actions` → 按 `kind` 执行**平台相关副作用**（`notify` 弹通知 / `pet_message` 展示宠物气泡 / `agent_run` 拉起 codex）。主动任务前由 app / MCP 适配层刷新只读外部信息源；`tokio`/进程/通知**绝不进 core**。
 - **规则引擎 → 响应规划器**：finding → `ResponsePolicy`(Immediate/Deferred/Debounce/Suppress) → `core::enqueue_action`。这是"立即 vs 延后 vs 防打扰"的可拓展 seam。
 
-**"何时触发"是确定性的活（在 app/引擎），"做什么/要不要打扰"才是 agent 的判断**——别把判断塞进调度器（呼应 §1.1）。
+**“何时触发”是确定性的活（在 app/引擎），“建议什么”才是 agent 的判断；最终是否打扰还要过宿主的冷却、去重和隐私策略**——别把判断塞进调度器（呼应 §1.1）。
 
-**打通 app→知识库→Notion**：主动队列是**触发器**，跨模块数据一致靠**投影管道**（`outbox` → projectors：知识→Obsidian、LifeIndex→Notion 白名单）。各模块真相源不同（Core=事件/artifact、Obsidian=知识散文、Notion=看板），各自幂等投影，不合一。典型串联：19:00 `agent_run` 读目标+知识缺口→挑支线→写 reminder→`notion_now` 刷 NOW 挂件 + `notify` 端侧。
+**打通本地状态 + Notion → 主动推送**：主动队列触发 `agent_run(mode=proactive_recommendation)`；宿主读取 `query_context` 并刷新 Notion 只读镜像；agent 返回一条带来源的结构化建议或 `no_recommendation`；宿主再把同一结果投递到宠物 / 系统通知。Notion 只参与输入，点击通知和完成状态只记本地，绝不回写用户文档。
+
+**现状（2026-07）**：调度器骨架、`ResponsePolicy` seam、`notify`/`pet_message`/`agent_run` 执行器、动态检测规则（`detection_rules` + `DynamicRule`，“一句话建规则”）、看板刷新（`lifeindex_refresh`）均已落地；Pi 与 Codex 两基座连同一 `sisyphus-mcp`、工具面一致、写门禁按 `RunMode` 区分（见 [agent.md](agent.md)）。
 
 完整数据模型、响应策略、执行器、可靠性与 MVP 边界见 [proactive-triggers.md](proactive-triggers.md)。

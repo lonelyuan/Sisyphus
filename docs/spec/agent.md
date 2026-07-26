@@ -9,13 +9,14 @@
 反思平面是系统"人类节奏"的那一半：对话、每日规划、复盘、知识加工。它**不负责实时监控**（那是感知平面 + 规则引擎的活，见 [rule-engine.md](rule-engine.md)）。
 
 ```
-现在（Phase 1）：不自建 Agent 基座
-  载体 = Codex / Claude Code
-  经 MCP 工具读写数据层（与 Tauri App 同一个 SQLite）
-  复用其现成的：对话 UI、工具调用循环、每日定时任务
+当前 App runtime：
+  Pi = Rust scheduler / Tauri command → Node sidecar → Pi JS SDK
+       直接 import createAgentSession / ModelRuntime，不调用 pi CLI
+  Codex = Rust scheduler / Tauri command → Codex runtime
+  两者共用 Sisyphus skill 和只读 MCP 契约
 
-后期（Phase 2+）：迁移到自研 Agent 基座
-  Agent 仍只经 MCP / CLI 碰数据 → 换基座只换脸不换脊椎
+后期：
+  可替换 Agent 基座或 sidecar 打包方式；Core 与 MCP 契约不变
   可加 RAG（pgvector）、个性化模型、多 Agent 编排
 ```
 
@@ -23,7 +24,31 @@
 
 - Agent 只能通过 **MCP 工具 / CLI** 访问 Core，不得直接读写 SQLite，不得内联业务逻辑。
 - Agent **读取**引擎产出（findings、today-context），**不逐拍驱动**引擎。引擎常驻自转，Agent 查它的结果。
-- 不用 Agent 做高频判定（如"在不在摸鱼"）——那是确定性引擎的活，便宜、实时。**Agent 是脸，引擎是脊椎。**
+- 不用 Agent 做高频判定（如"在不在摸鱼"）——那是确定性引擎的活，便宜、实时。**引擎是常驻的确定性后端，Agent 是按需的交互前端。**
+
+### 运行模式（写门禁按模式区分）
+
+宿主（`agent_runtime::RunMode`）按场景决定 Agent 的写权限，MCP server 据 `SISYPHUS_READ_ONLY` / `SISYPHUS_LIFEINDEX_ONLY` 硬门禁执行：
+
+| 模式 | 触发 | 本地写 | 外部源（Notion） |
+|---|---|---|---|
+| **Interactive** | 主对话 / 宠物（用户主动） | 可写（经用户确认可 set_goal / 建规则 / 写知识 / 落任务等） | 只读 |
+| **Proactive** | 定时 / 规则触发的推荐 | 只读 | 只读 |
+| **LifeIndex** | 每日看板刷新 | 仅看板卡片（`upsert_lifeindex_card`），其它写禁用 | 只读 |
+
+两个基座（Pi JS SDK / Codex）连同一个 `sisyphus-mcp`，工具面与门禁一致；换基座只换交互前端。
+
+### 个人看板主动模式的额外边界
+
+`agent_run(mode=proactive_recommendation)` 是一个**只读推理任务**：
+
+- 只读取本地 `query_context`、历史反馈和已配置的 `ContextSource`。
+- Notion 工具面只有 list / read / query，不暴露 create / update / append / delete。
+- 不在 Notion 维护 Inbox、NOW、“下一项”或完成状态；Notion 全部内容只有用户编辑。
+- agent 只返回一条结构化 recommendation 或 `no_recommendation`，不直接发通知、不写数据库。
+- 宿主程序负责新鲜度检查、冷却 / 去重 / 隐私策略、记录投递结果，并把同一 recommendation 推给宠物和/或系统通知。
+
+这不影响交互式会话在用户确认后通过 MCP 写本地 artifact，也不影响知识工作流写获准的 Obsidian vault；限制针对的是主动任务及用户拥有的外部内容源。
 
 ---
 
@@ -68,6 +93,7 @@ App 侧运行一个 MCP server（数据层之上的薄适配器），暴露下�
 以关心但不评判的语气回应。不要羞辱或说教。
 提醒要具体（引用实际时长和目标），不要泛泛而谈。
 只提出最小下一步，不生成任务海。
+个人看板内容只读；建议只通过宠物或通知呈现，不回写用户文档。
 ```
 
 ---
@@ -80,12 +106,13 @@ App 侧运行一个 MCP server（数据层之上的薄适配器），暴露下�
 
 ---
 
-## API Key 管理
+## Pi 配置与 API Key
 
-现阶段承载在 Codex / Claude Code，Key 由这些工具自身管理，本项目不经手。
+Pi 不使用全局 CLI 的 `/login` 状态。在 App「设置 → Pi JS SDK 模型配置」填写：
 
-后期若自研基座运行在 Tauri WebView 内，则：
+1. Provider / API 协议（例如 OpenAI Responses、Anthropic Messages）。
+2. API Endpoint；官方 provider 可留空，内网网关或兼容接口填完整 base URL。
+3. Model ID 和 API Key。
+4. 点「保存并测试」，由 Pi SDK 发起最小请求验证。
 
-- Key 存 OS 加密存储（Tauri Store `keys.dat`），不写入代码或 `.env`。
-- 设置页提供输入框，用户自持 Key；为空时 UI 展示引导。
-- 再后期迁移到服务端代理：Key 托管服务端，客户端只改 endpoint。
+Key 不返回 WebView；Rust 只在启动 SDK sidecar 时通过子进程环境传入。配置文件在 Unix 上限制为 `0600`。后续仍应迁移到 OS Keychain / 安全存储。

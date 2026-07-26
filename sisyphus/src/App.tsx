@@ -1,12 +1,14 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { invoke, addPluginListener, type PluginListener } from "@tauri-apps/api/core";
-import { Target, ScrollText, Settings2 } from "lucide-react";
-import TodayScreen from "./screens/TodayScreen";
-import RecordsScreen from "./screens/RecordsScreen";
+import { platform as osPlatform } from "@tauri-apps/plugin-os";
+import { MessageCircle, Settings2, Waves, LayoutGrid } from "lucide-react";
+import AgentScreen from "./screens/AgentScreen";
+import TimelineScreen from "./screens/TimelineScreen";
+import LifeIndexScreen from "./screens/LifeIndexScreen";
 import SettingsScreen from "./screens/SettingsScreen";
 import { cn } from "@/lib/utils";
 
-type Tab = "today" | "records" | "settings";
+type Tab = "agent" | "timeline" | "lifeindex" | "settings";
 
 interface UsageEvent {
   pkg: string;
@@ -22,105 +24,134 @@ interface FindingOutput {
 }
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>("today");
+  const [tab, setTab] = useState<Tab>("agent");
 
   // 监听 Kotlin UsagePlugin 推送的前台 app 事件，触发 Rust 规则评估（Android）
   useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
     let listener: PluginListener | null = null;
-    addPluginListener<UsageEvent>("usage", "usage_event", async (event) => {
-      try {
-        const finding = await invoke<FindingOutput | null>("evaluate_rules", {
-          ctx: {
-            current_app: event.pkg || null,
-            current_category: event.category || null,
-            active_entertainment_ms: event.active_ms ?? 0,
-            media_playing_since_ms: 0,
-            recent_scroll_count: 0,
-          },
-        });
-        if (finding) {
-          await invoke("plugin:notification|showIntervention", {
-            message: finding.message,
-            interventionId: finding.intervention_id,
+    let cancelled = false;
+    try {
+      if (osPlatform() !== "android" || cancelled) return;
+      addPluginListener<UsageEvent>("usage", "usage_event", async (event) => {
+        try {
+          const finding = await invoke<FindingOutput | null>("evaluate_rules", {
+            ctx: {
+              current_app: event.pkg || null,
+              current_category: event.category || null,
+              active_entertainment_ms: event.active_ms ?? 0,
+              media_playing_since_ms: 0,
+              recent_scroll_count: 0,
+            },
           });
+          if (finding) {
+            await invoke("plugin:notification|showIntervention", {
+              message: finding.message,
+              interventionId: finding.intervention_id,
+            });
+          }
+        } catch (e) {
+          console.error("evaluate_rules error", e);
         }
-      } catch (e) {
-        console.error("evaluate_rules error", e);
-      }
-    })
-      .then((l) => {
-        listener = l;
       })
-      .catch(console.error);
+        .then((l) => {
+          if (cancelled) void l.unregister();
+          else listener = l;
+        })
+        .catch(console.error);
+    } catch (e) {
+      console.error("platform detection error", e);
+    }
     return () => {
+      cancelled = true;
       listener?.unregister();
     };
   }, []);
 
   // 监听通知按钮响应事件
   useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
     let listener: PluginListener | null = null;
-    addPluginListener<{ intervention_id: string; action: string }>(
-      "notification",
-      "action_taken",
-      async ({ intervention_id, action }) => {
-        try {
-          await invoke("record_feedback", { interventionId: intervention_id, action });
-        } catch (e) {
-          console.error("record_feedback error", e);
-        }
-      },
-    )
-      .then((l) => {
-        listener = l;
-      })
-      .catch(console.error);
+    let cancelled = false;
+    try {
+      if (osPlatform() !== "android" || cancelled) return;
+      addPluginListener<{ intervention_id: string; action: string }>(
+        "notification",
+        "action_taken",
+        async ({ intervention_id, action }) => {
+          try {
+            await invoke("record_feedback", { interventionId: intervention_id, action });
+          } catch (e) {
+            console.error("record_feedback error", e);
+          }
+        },
+      )
+        .then((l) => {
+          if (cancelled) void l.unregister();
+          else listener = l;
+        })
+        .catch(console.error);
+    } catch (e) {
+      console.error("platform detection error", e);
+    }
     return () => {
+      cancelled = true;
       listener?.unregister();
     };
   }, []);
 
   return (
-    <div className="flex h-screen flex-col bg-background text-foreground">
-      {/* 顶栏 */}
-      <header className="flex shrink-0 items-center justify-between border-b border-border px-5 py-3">
+    <div className="app-shell">
+      <header className="app-topbar">
         <div className="flex items-center gap-2">
-          <span className="text-[15px] leading-none">⛰</span>
-          <span className="text-sm font-semibold tracking-tight">西西弗斯</span>
+          <span className="brand-mark">S</span>
+          <div>
+            <span className="brand-name">西西弗斯</span>
+            <span className="brand-subtitle">LOCAL COMPANION</span>
+          </div>
         </div>
-        <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-          <span className="h-1.5 w-1.5 rounded-full bg-success" />
-          常驻中
+        <div className="resident-status">
+          <span /> 感知中
         </div>
       </header>
 
-      {/* 内容区（唯一滚动区域） */}
-      <main className="flex-1 overflow-y-auto">
-        {tab === "today" && <TodayScreen />}
-        {tab === "records" && <RecordsScreen />}
-        {tab === "settings" && <SettingsScreen />}
-      </main>
+      <div className="app-body">
+        <nav className="app-sidebar" aria-label="主导航">
+          <TabItem label="Agent" icon={<MessageCircle size={18} />} active={tab === "agent"} onClick={() => setTab("agent")} />
+          <TabItem label="时间轴" icon={<Waves size={18} />} active={tab === "timeline"} onClick={() => setTab("timeline")} />
+          <TabItem label="看板" icon={<LayoutGrid size={18} />} active={tab === "lifeindex"} onClick={() => setTab("lifeindex")} />
+          <div className="sidebar-spacer" />
+          <TabItem label="设置" icon={<Settings2 size={18} />} active={tab === "settings"} onClick={() => setTab("settings")} />
+        </nav>
 
-      {/* 底部 tab 栏 */}
-      <nav className="flex shrink-0 border-t border-border">
-        <TabItem
-          label="今日"
-          icon={<Target size={18} strokeWidth={1.75} />}
-          active={tab === "today"}
-          onClick={() => setTab("today")}
-        />
-        <TabItem
-          label="记录"
-          icon={<ScrollText size={18} strokeWidth={1.75} />}
-          active={tab === "records"}
-          onClick={() => setTab("records")}
-        />
-        <TabItem
-          label="设置"
-          icon={<Settings2 size={18} strokeWidth={1.75} />}
-          active={tab === "settings"}
-          onClick={() => setTab("settings")}
-        />
+        <main className={cn("app-content", tab === "timeline" && "timeline-active")}>
+          {/* Agent 始终挂载：切页时保留进行中的请求、草稿、滚动位置和组件状态。 */}
+          <div className="app-panel agent-panel" hidden={tab !== "agent"}>
+            <AgentScreen isVisible={tab === "agent"} />
+          </div>
+          {tab === "timeline" && (
+            <div className="app-panel timeline-panel">
+              <TimelineScreen />
+            </div>
+          )}
+          {tab === "lifeindex" && (
+            <div className="app-panel lifeindex-panel">
+              <LifeIndexScreen />
+            </div>
+          )}
+          {tab === "settings" && (
+            <div className="app-panel settings-panel">
+              <SettingsScreen />
+            </div>
+          )}
+        </main>
+      </div>
+
+      <nav className="app-mobile-nav" aria-label="主导航">
+        <TabItem label="Agent" icon={<MessageCircle size={18} />} active={tab === "agent"} onClick={() => setTab("agent")} />
+        <TabItem label="时间轴" icon={<Waves size={18} />} active={tab === "timeline"} onClick={() => setTab("timeline")} />
+        <TabItem label="看板" icon={<LayoutGrid size={18} />} active={tab === "lifeindex"} onClick={() => setTab("lifeindex")} />
+        <TabItem label="设置" icon={<Settings2 size={18} />} active={tab === "settings"} onClick={() => setTab("settings")} />
       </nav>
     </div>
   );
@@ -141,8 +172,8 @@ function TabItem({
     <button
       onClick={onClick}
       className={cn(
-        "flex flex-1 flex-col items-center gap-1 py-2.5 text-[11px] transition-colors",
-        active ? "text-accent" : "text-muted-foreground hover:text-foreground",
+        "nav-item",
+        active && "active",
       )}
     >
       {icon}

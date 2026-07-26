@@ -1,6 +1,6 @@
 # Spec: 本地存储
 
-本地存储由 **Rust 侧（rusqlite）** 管理，schema 定义在 `sisyphus/src-tauri/src/db.rs`。
+本地存储由 **Rust 侧（rusqlite）** 管理，Core schema 定义在 `sisyphus/src-tauri/crates/core/src/db.rs`。
 
 不使用 ORM 或注解处理器（Room/KSP），schema 直接用 SQL 字符串定义，避免编译器插件依赖。
 
@@ -13,7 +13,8 @@
 | 类别 | 表 | 性质 | 统一吗 |
 |---|---|---|---|
 | **Event log** | `raw_events`（+ 派生层同表） | append-only，不可变 | 统一（信封 + payload） |
-| **Artifact store** | `daily_goals`、`interventions`、（后续）`notes`/`tasks`/`knowledge_nodes` | 可变，有 status | 不统一，分表 |
+| **Artifact store** | `daily_goals`、`interventions`、`tasks`/`notes`/`reminders`/`intent_candidates`、`scheduled_actions`、`detection_rules`、`lifeindex_cards`、`knowledge_notes`、`monitored_apps` | 可变，有 status | 不统一，分表 |
+| **External source cache** | （规划）`source_connections`、`source_snapshots` | 外部内容的只读、可重建镜像 | 统一上下文信封，不是 artifact |
 | 传输 | `outbox` | 上传队列 | — |
 
 **铁律**：不造多态大表 `artifacts` 用 type 兜住所有对象；每种有状态对象各自建表。**第二个采集源落地前，不新增 artifact 表**（见 [architecture.md](architecture.md) §2.3）。
@@ -82,6 +83,15 @@ ORDER BY start_time DESC LIMIT 1;
 | `user_response` | 用户点击的按钮：`start_task` \| `take_rest` \| `continue` \| `abandon_today` |
 | `outcome` | 干预后结果（延迟回填） |
 
+### `source_connections` / `source_snapshots` — 外部信息源缓存（规划）
+
+Notion 等用户既有工具通过只读 `ContextSource` 接入。不要为每个工具各造一套任务表；用通用连接元数据和带来源的快照信封缓存：
+
+- `source_connections`：源类型、只读模式、用户授权范围、启用状态、最后同步结果；**不存 token**。
+- `source_snapshots`：`connection_id + external_id` 幂等键、源更新时间、观测时间、内容 hash 与原始 / 归一化 payload。
+
+这两张表不是第三类真相，也不是多态 Artifact store：它们是可以随时删除并从外部源重建的读取投影。用户内容仍以原工具为准；主动智能体只能读取镜像，确定性同步器负责刷新。完整设计见 [notion-integration.md](notion-integration.md)。
+
 ---
 
 ## 本地 schema vs Supabase schema
@@ -90,7 +100,7 @@ ORDER BY start_time DESC LIMIT 1;
 
 | 位置 | 文件 |
 |---|---|
-| 本地 SQLite | `sisyphus/src-tauri/src/db.rs`（SCHEMA 字符串）|
+| 本地 SQLite | `sisyphus/src-tauri/crates/core/src/db.rs`（SCHEMA 字符串）|
 | Supabase | `services/ingest/supabase/migrations/0001_init.sql` |
 
 **约束**：`raw_events` 表字段含义必须一致；本地用 epoch ms 存时间，上传时序列化为 RFC3339。Supabase 表有额外字段（`ingested_at`），本地无需同步。

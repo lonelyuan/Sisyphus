@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use rusqlite::Connection;
 use serde_json::json;
-use crate::rule_engine::{Finding, Rule, RuleContext};
+use crate::rule_engine::{Finding, ResponsePolicy, Rule, RuleContext};
 use crate::rule_engine::config::EntertainmentRuleConfig;
 use crate::db;
 
@@ -115,6 +115,10 @@ impl Rule for EntertainmentSessionRule {
             }),
             recommended_intervention_types: vec!["notification".to_string()],
             parent_event_ids: vec![],
+            response: ResponsePolicy::Immediate {
+                kind: "notify".to_string(),
+            },
+            message: None,
         }))
     }
 }

@@ -1,0 +1,19 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "pet",
+  "description": "宠物窗口：拖动/resize/显隐所需的 core:window 权限（默认 capability 只授权 main 窗口）。",
+  "platforms": ["macOS", "windows", "linux"],
+  "windows": ["pet"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position",
+    "core:window:allow-outer-position",
+    "core:window:allow-scale-factor",
+    "core:window:allow-set-focus",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "log:default"
+  ]
+}

@@ -1,8 +1,8 @@
 # Spec: 主动触发（调度器 · 动作队列 · Agent 派发）
 
-本文件是西西弗斯**主动能力**的权威文档：系统如何在没有用户当下输入时，自己决定"何时做点什么"，以及把结果投递到通知 / 知识库 / Notion 看板。
+本文件是西西弗斯**主动能力**的权威文档：系统如何在没有用户当下输入时，自己决定“何时做点什么”，读取本地与外部上下文，并把结果投递到宠物 / 系统通知。
 
-上位文档：[architecture.md](architecture.md)（两平面 + 双存储 + `ingest_event` 契约）。本设计横跨两个平面：**"何时触发"是感知平面的确定性活**（不调 LLM），**"做什么/说什么"可以是反思平面的 agent**。相关：[rule-engine.md](rule-engine.md)（行为触发来源）、[notion-integration.md](notion-integration.md)（Notion 投递面）。
+上位文档：[architecture.md](architecture.md)（两平面 + 双存储 + `ingest_event` 契约）。本设计横跨两个平面：**“何时触发”是感知平面的确定性活**（不调 LLM），**“结合什么信息、建议什么”可以是反思平面的 agent**。相关：[rule-engine.md](rule-engine.md)（行为触发来源）、[notion-integration.md](notion-integration.md)（Notion 只读信息源）。
 
 ---
 
@@ -26,12 +26,11 @@
                          ↓ 常驻循环 due-check（到点取出）
 执行器（按 kind 派发副作用）
   notify        端侧通知（确定性，便宜）
-  agent_run     拉起反思平面 agent（Codex CLI/SDK），带 skill+scope+vault
-  notion_now    刷新 Notion NOW 挂件（白名单，notion-integration §3.3）
-  notion_inbox  append 到 Notion Inbox
+  pet_message   宠物气泡 / 动画（消费同一份推荐结果）
+  agent_run     拉起反思平面 agent（Pi JS SDK / Codex runtime），带本地状态和只读信息源
   …（可拓展）
                          ↓ 投递面
-              通知 · 知识库 vault · Notion 看板
+              宠物 · 系统通知 · 知识库 vault
 ```
 
 ---
@@ -43,7 +42,7 @@
 | 层 | 职责 | 依赖 |
 |---|---|---|
 | **`sisyphus-core::scheduler`** | 队列的**纯数据逻辑**：`enqueue_action` / `due_actions(now)` / `mark_fired` / `mark_done` / 周期动作 `reschedule`。**无副作用、无 IO 之外的东西**、纯 `rusqlite`。安卓可编。 | rusqlite（已有） |
-| **app（感知平面常驻）** | 常驻 **ticker** 每 N 秒调 `due_actions` → 按 `kind` 执行**平台相关副作用**：通知（`tauri-plugin-notification`）、拉起 codex（`std::process::Command`）、Notion 回写（走 indexer/MCP）。 | tauri、std::process |
+| **app（感知平面常驻）** | 常驻 **ticker** 每 N 秒调 `due_actions` → 按 `kind` 执行**平台相关副作用**：通知、宠物展示、拉起 codex；主动任务前经只读适配器刷新外部上下文。 | tauri、std::process |
 | **规则引擎 → 响应规划器** | finding → `ResponsePolicy` → `core::enqueue_action`。规划器是 §3 的可拓展 seam。 | core |
 
 > **铁律**：`tokio`/`rmcp`/进程/通知**绝不进 core**。core 只回答"现在有哪些动作到期了"，**怎么执行**是 app 的事。这样安卓端即使不能拉起 codex，也照样能编译、照样能跑 `notify` 类动作。
@@ -57,7 +56,7 @@
 ```sql
 CREATE TABLE IF NOT EXISTS scheduled_actions (
   id            TEXT PRIMARY KEY,
-  kind          TEXT NOT NULL,              -- notify | agent_run | notion_now | notion_inbox | …（可拓展枚举）
+  kind          TEXT NOT NULL,              -- notify | pet_message | agent_run | …（可拓展枚举）
   payload_json  TEXT NOT NULL DEFAULT '{}', -- kind 相关：agent_run={skill,prompt,scope,vault}; notify={title,body}
   due_at_ms     INTEGER NOT NULL,           -- 到点时刻；= now 即"立即"
   recurrence    TEXT,                       -- NULL=一次性；如 "daily@09:00" / cron 串=周期（fire 后重排下一次）
@@ -96,7 +95,7 @@ enum DueTime { At(i64), After(i64) }   // 绝对 epoch ms / 相对延迟 ms
 
 **"响应规划器"** 把 policy 翻译成 `enqueue_action`：`Immediate`→`due_at=now`；`Deferred{After(Δ)}`→`due_at=now+Δ`；`Debounce`→带 `dedup_key` 入队。**MVP 规划器可以极简（一律 Immediate→notify），但这个 seam 必须先立住**——日后加"检测到 doom-scrolling 但现在别烦他、45 分钟后若仍在刷再提醒""夜间 policy=Suppress""下班闲暇时段才推支线"都只是新增 policy 分支，不动执行器、不动队列。
 
-> 这也把 [notion-integration.md §3.3/§4.4](notion-integration.md) 的"引擎检测闲暇→挑一条低精力短时行动→刷 NOW+通知"纳入同一框架：那是 `Deferred/Immediate` + `kind=notion_now`+`kind=notify` 两个动作。
+> 个人看板链路也使用同一框架：引擎检测到闲暇后 enqueue `agent_run(mode=proactive_recommendation)`；宿主刷新本地状态与 Notion 只读上下文，agent 只生成一条推荐，再由宿主投递到宠物 / 通知。Notion 不是执行器，也没有回写动作。
 
 ---
 
@@ -106,37 +105,38 @@ enum DueTime { At(i64), After(i64) }   // 绝对 epoch ms / 相对延迟 ms
 
 | kind | 执行（app 层） | 平台 | 现状 |
 |---|---|---|---|
-| `notify` | `tauri-plugin-notification` / 安卓 InterventionNotification | 桌面+安卓 | ✅ 通道已有 |
-| `agent_run` | `std::process::Command` 拉起 codex（复用 `services/knowledge-agent` 派发；传 `SISYPHUS_VAULT`+skill+prompt+scope）→ agent 经 MCP 写回卡片/reminder → 完成后可再 `enqueue(notify)` 把结果推给用户 | **仅桌面**（手机无 node/codex） | 🟡 待接 |
-| `notion_now` | 覆盖写 Notion 🔄NOW 块（白名单，见 [notion-integration.md §2.4](notion-integration.md)） | 桌面 | 🔴 待 indexer |
-| `notion_inbox` | append 到 📥Inbox | 桌面 | 🔴 待 indexer |
+| `notify` | `tauri-plugin-notification` / 安卓 InterventionNotification | 桌面+安卓 | ✅ |
+| `pet_message` | emit `pet-message` 事件给宠物窗展示（`Pet.tsx` 监听）；与 `agent-recommendation` 共用展示逻辑 | 桌面 | ✅ 已接（去重待做） |
+| `agent_run` | worker 线程 `std::process::Command` 拉起 Pi/Codex；按 payload mode（proactive/lifeindex）读本地 MCP 与只读外部源，返回结构化结果再投递 | **仅桌面**（手机无 node/codex） | ✅ 已接 |
 
-**agent_run 的往返**：app 到点 → 拉 codex（不思考，只执行）→ codex 在本地 db/vault 上干活（整理/找缺口/挑支线/写 reminder artifact）→ app 通知投递。**"何时触发"确定性在 app，"做什么/要不要打扰"判断在 agent**——别把判断塞进调度器。
+**agent_run 的往返**：app 到点 → 并行读取本地 `query_context`、刷新 Notion 等只读信息源 → 拉 codex 推理 → codex 返回一条结构化 recommendation 或 `no_recommendation` → app 做冷却 / 去重 / 隐私校验 → 宠物与通知消费同一结果。**“何时触发”确定性在 app，“推荐什么”在 agent，“是否最终打扰”由宿主策略兜底**。
 
 ---
 
-## 5. 打通：app → 知识库 → Notion 看板
+## 5. 打通：本地状态 + 外部信息源 → 主动推送
 
-主动队列是**触发器**；跨模块的数据一致靠**投影管道**（`outbox` → projectors）。两者配合才叫"打通"，但不是把三个库揉成一个——**各模块真相源不同，各自幂等投影**：
+主动队列是**触发器**；信息源适配器负责读取与缓存。两者配合，但不把本地库、知识库和 Notion 揉成一个——**状态按创建者归属，外部内容只做带来源的只读镜像**：
 
 | 模块 | 真相源 | 投影 |
 |---|---|---|
 | Core（事件/artifact） | 本地 SQLite（[architecture.md §2](architecture.md)） | — |
 | 第二大脑（知识散文） | Obsidian vault `.md` | 由 write_knowledge_note 落盘 + 索引（可重建投影） |
-| LifeIndex（作战看板） | **Notion**（[notion-integration.md §0](notion-integration.md)） | 本地只读镜像 `notion_actions` + 白名单回写 |
+| LifeIndex（用户上下文） | **Notion，只有用户编辑**（[notion-integration.md §0](notion-integration.md)） | 通用本地只读镜像 `source_snapshots` |
+| 主动建议 / 投递 / 反馈 | 本地 SQLite | 宠物和系统通知是展示渠道，不是真相源 |
 
 **打通的两条管道**：
-1. **投影管道（数据一致）**：canonical artifact 变更 → `outbox` 事件 → projectors：知识 → Obsidian；LifeIndex 动作/NOW → Notion（白名单）。`outbox` 表已存在（[architecture.md §7](architecture.md)），是这条管道的地基。
-2. **主动管道（跨模块触发）**：本 spec 的动作队列把三者串起来。典型串联：
+1. **上下文同步（读取）**：主动任务开始 → 各 `ContextSource.refresh()` → 用外部 ID / 修改时间 / hash 幂等刷新本地镜像。方向只有 `source → local cache`。
+2. **主动管道（推理与投递）**：本 spec 的动作队列把多源上下文与终端展示串起来。典型串联：
 
 ```
 19:00 触发（scheduled_actions, recurrence=daily@19:00, kind=agent_run）
-  → 拉 codex(assistant skill, scope=personal)
-  → 读 query_context(目标/任务) + Notion 镜像(#低精力#now 行动) + 知识库 #待确认 缺口
-  → 挑一件最可能感兴趣的支线，写 reminder artifact
-  → enqueue(kind=notion_now, 刷 🔄NOW 挂件) + enqueue(kind=notify, 端侧提醒)
+  → 刷新 Notion 只读源，并读取 query_context(目标/行为/近期反馈)
+  → 拉 codex(mode=proactive_recommendation, max=1)
+  → 返回“做什么 + 为什么 + source refs”，或 no_recommendation
+  → 宿主去重 / 冷却
+  → 同一 recommendation 投递到 pet_message 和/或 notify
 ```
-一次主动动作，跨 Core（reminder artifact）→ 知识库（读缺口）→ Notion（刷 NOW）→ 端侧（通知）。这就是三者打通的落地形态。
+Notion 只参与输入，不参与输出。用户在 Notion 中的后续修改，会在下一次刷新时自然进入判断；点击通知不会改写 Notion。
 
 ---
 
@@ -152,15 +152,18 @@ enum DueTime { At(i64), After(i64) }   // 绝对 epoch ms / 相对延迟 ms
 
 ## 7. 落地边界（MVP vs 后续）
 
-**MVP（最小骨架，本次）：**
+**已落地：**
 1. `core::scheduler`：`scheduled_actions` 表 + `enqueue_action` / `due_actions` / `mark_fired` / `mark_done` / 周期 `reschedule` + 单测。
-2. app 常驻 ticker：`due-check` → 派发 **`notify`** 与 **`agent_run`**（spawn codex，缺 codex 时优雅降级）。
-3. 种一个静态 job：**每日 9 点知识库自省**（`kind=agent_run`, skill=knowledge-engine, 跑去碎片化+找缺口）。
+2. app 常驻 ticker：`due-check` 派发 `notify` / `pet_message`（emit 到宠物窗，`Pet.tsx` 监听）/ `agent_run`（放 worker 线程执行，不阻塞主循环；缺 runtime 优雅降级）。
+3. `ResponsePolicy` seam 已立（`core::rule_engine::ResponsePolicy`：Immediate/Deferred/Debounce/Suppress）：规则命中经它落地——Immediate 即时派发、Deferred/Debounce 入队。
+4. 静态周期 job：每日 9:00 `proactive_recommendation`、每日 8:30 `lifeindex_refresh`（读 Notion 只读 → 更新本地看板）。旧“知识库自省”job 已停用（与只读边界冲突）。
+5. `agent_run` 模式区分：`proactive_recommendation`（只读）/ `lifeindex_refresh`（仅看板可写）；主对话为交互可写。
 
 **后续（按需，勿提前造）：**
-- 响应规划器接规则引擎（`Deferred`/`Debounce`/`Suppress` 落地真实防打扰）。
-- `notion_now`/`notion_inbox` 执行器（依赖 `notion_indexer`，见 notion-integration §6）。
+- 响应规划器接更多规则策略（真实 `Deferred`/`Debounce`/`Suppress` 防打扰场景批量落地）。
+- 只读 `ContextSource` + `source_snapshots` 确定性同步器（当前 Notion 由 agent 自身只读读取）。
+- `pet_message` 与系统通知按 recommendation id 去重。
 - `launchd`/`WorkManager` 存活兜底；跨端同步动作。
-- 夜间免打扰、精力/时段情境筛选（GTD context，notion-integration §4.4）。
+- 夜间免打扰、精力/时段情境筛选和陈旧信息阈值。
 
-**明确舍弃/暂缓**：不引入独立消息队列/编排平台；不把三库合一；调度绝不写进某个 agent 基座（保持基座可换）。
+**明确舍弃/暂缓**：不引入独立消息队列/编排平台；不把三库合一；不让 agent 编辑 Notion；调度绝不写进某个 agent 基座（保持基座可换）。

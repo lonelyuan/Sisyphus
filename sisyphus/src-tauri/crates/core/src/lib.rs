@@ -8,6 +8,7 @@
 
 pub mod db;
 pub mod rule_engine;
+pub mod rules;
 pub mod ingest;
 pub mod context;
 pub mod category;
@@ -18,6 +19,7 @@ pub mod sources;
 pub mod intervention;
 pub mod timeline;
 pub mod scheduler;
+pub mod lifeindex;
 
 pub use ingest::{ingest_event, capture_text, NewEvent};
 pub use rule_engine::{DailyGoal, Finding, RuleContext, RuleEngine};

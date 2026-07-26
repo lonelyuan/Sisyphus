@@ -1,19 +1,20 @@
-mod commands;
-#[cfg(target_os = "macos")]
-mod collector;
-#[cfg(desktop)]
-mod scheduler_runner;
+mod agent_runtime;
 #[cfg(target_os = "android")]
 mod android_jni;
+#[cfg(target_os = "macos")]
+mod collector;
+mod commands;
+#[cfg(desktop)]
+mod scheduler_runner;
 
 use commands::AppState;
 use sisyphus_core::db;
-use sisyphus_core::rule_engine::RuleEngine;
 use sisyphus_core::rule_engine::config::RuleConfig;
+use sisyphus_core::rule_engine::RuleEngine;
 use std::sync::Mutex;
-use tauri::{Manager, Runtime};
 #[cfg(target_os = "android")]
 use tauri::plugin::{PluginHandle, TauriPlugin};
+use tauri::{Manager, Runtime};
 use uuid::Uuid;
 
 #[tauri::command]
@@ -146,6 +147,19 @@ fn show_main(app: &tauri::AppHandle) {
     }
 }
 
+/// 显示/隐藏桌面宠物窗口（tray 菜单「宠物」切换）。
+#[cfg(desktop)]
+fn toggle_pet(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("pet") {
+        if w.is_visible().unwrap_or(false) {
+            let _ = w.hide();
+        } else {
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+    }
+}
+
 /// 在桌面端安装菜单栏（tray）图标：左键唤回窗口，右键菜单「打开 / 退出」。
 #[cfg(desktop)]
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
@@ -153,8 +167,9 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
     let open_i = MenuItem::with_id(app, "open", "打开西西弗斯", true, None::<&str>)?;
+    let pet_i = MenuItem::with_id(app, "pet", "宠物 显示/隐藏", true, None::<&str>)?;
     let quit_i = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open_i, &quit_i])?;
+    let menu = Menu::with_items(app, &[&open_i, &pet_i, &quit_i])?;
 
     let mut builder = TrayIconBuilder::with_id("main")
         .tooltip("西西弗斯 · 感知平面常驻中")
@@ -162,6 +177,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => show_main(app),
+            "pet" => toggle_pet(app),
             "quit" => app.exit(0),
             _ => {}
         })
@@ -189,6 +205,17 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: None,
+                    }),
+                ])
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_notification::init());
@@ -215,9 +242,14 @@ pub fn run() {
                 .app_data_dir()
                 .expect("failed to get app data dir");
             std::fs::create_dir_all(&data_dir)?;
+
+            // 修编译期路径依赖：用运行期 resource_dir 注入 skills / pi runner / mcp 二进制路径，
+            // release 构建不再指向编译期 CARGO_MANIFEST_DIR（打包 / 移动仓库后即失效）。
+            #[cfg(desktop)]
+            agent_runtime::init_paths(app.path().resource_dir().ok().as_deref(), None);
+
             let db_path = data_dir.join("sisyphus.db");
-            let conn = db::open(db_path.to_str().unwrap())
-                .expect("failed to open database");
+            let conn = db::open(db_path.to_str().unwrap()).expect("failed to open database");
 
             // 持久化 device_id（借鉴旧原生工程 AppPreferences）：生成一次存盘复用，
             // 避免每次启动都换 id 导致 seq_no 断裂 / 跨端聚合错乱。
@@ -248,6 +280,8 @@ pub fn run() {
             let sched_db = db_path.clone();
             #[cfg(desktop)]
             let sched_vault = vault_dir.clone();
+            #[cfg(desktop)]
+            let sched_data = data_dir.clone();
 
             let state = AppState {
                 conn: Mutex::new(conn),
@@ -255,6 +289,7 @@ pub fn run() {
                 user_id: "local-user".to_string(),
                 device_id,
                 vault_dir,
+                data_dir: data_dir.clone(),
             };
             app.manage(state);
 
@@ -262,7 +297,9 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 let handle = app.handle().clone();
-                std::thread::spawn(move || scheduler_runner::run(sched_db, sched_vault, handle));
+                std::thread::spawn(move || {
+                    scheduler_runner::run(sched_db, sched_vault, sched_data, handle)
+                });
             }
 
             // 感知平面：桌面前台采集器后台线程（独立连接，与 App 同库）。
@@ -303,6 +340,14 @@ pub fn run() {
             commands::record_feedback,
             commands::get_today_context,
             commands::get_vault_path,
+            commands::get_agent_runtime_status,
+            commands::set_agent_runtime,
+            commands::run_agent,
+            commands::cancel_agent_run,
+            commands::get_llm_config,
+            commands::set_llm_config,
+            commands::get_notion_config,
+            commands::set_notion_config,
             commands::run_knowledge_agent,
             commands::list_tasks,
             commands::create_task,
@@ -311,12 +356,16 @@ pub fn run() {
             commands::list_reminders,
             commands::set_reminder_status,
             commands::list_interventions,
-            commands::list_sessions,
+            commands::query_timeline,
             commands::list_knowledge,
             commands::list_scheduled_actions,
             commands::list_monitored_apps,
             commands::add_monitored_app,
             commands::remove_monitored_app,
+            commands::list_detection_rules,
+            commands::set_detection_rule_enabled,
+            commands::delete_detection_rule,
+            commands::list_lifeindex,
             check_usage_permission,
             request_usage_permission,
             start_collector,

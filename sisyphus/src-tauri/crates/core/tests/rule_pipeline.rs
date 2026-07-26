@@ -37,6 +37,7 @@ fn ctx_with(goal: Option<sisyphus_core::rule_engine::DailyGoal>) -> RuleContext 
         current_app: Some("com.apple.TV".to_string()),
         current_category: Some("entertainment.video".to_string()),
         active_entertainment_ms: 120_000, // 2min ≥ 1min(debug) 阈值
+        active_session_ms: 120_000,
         media_playing_since_ms: 0,
         recent_scroll_count: 0,
         today_goal: goal,

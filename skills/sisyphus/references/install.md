@@ -40,7 +40,7 @@ Claude Code / 其它 MCP 客户端填等价的 stdio server 配置。重启后�
   <array>
     <string><CODEX_BIN></string>
     <string>exec</string>
-    <string>用 sisyphus 做今日规划：先 query_context，再结合未处理 capture 帮我定今天的最小目标并 set_goal。</string>
+    <string>用 sisyphus 做今日规划：先 query_context；若配置了只读 Notion 上下文源，刷新并读取用户更新但绝不写 Notion；再结合未处理 capture，只推荐一个最小目标并 set_goal。</string>
   </array>
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
@@ -57,7 +57,7 @@ launchctl load ~/Library/LaunchAgents/com.sisyphus.morning-plan.plist
 launchctl load ~/Library/LaunchAgents/com.sisyphus.evening-review.plist
 ```
 
-> 定时任务只是到点拉起 Codex 跑例程；真正读写仍走 `sisyphus` MCP，桌面 App 没开也能工作。
+> 定时任务只是到点拉起 Codex 跑例程；本地状态读写走 `sisyphus` MCP。Notion 若接入，只能通过只读连接器作为信息源，不得给主动任务暴露 create / update / append / delete 工具。
 
 ## 4.（可选）知识 agent 派发（第二大脑深研）
 

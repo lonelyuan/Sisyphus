@@ -1,245 +1,245 @@
-# Spec: Notion 集成（LifeIndex 双向流）
+# Spec: Notion 集成（用户编辑 · 智能体只读）
 
-本文件是西西弗斯与 Notion 集成的**权威文档**。定位、格式契约、信息流、写权限白名单、排版方法论都以本文件为准。改动集成方式先改本文件。
+本文件是西西弗斯接入 Notion / LifeIndex 的**权威文档**。权限边界、同步语义、主动任务信息流和本地镜像都以本文件为准。
 
-上位文档：[architecture.md](architecture.md)（两平面 + 双存储）。本集成属**反思平面**，不进 `sisyphus-core`（守安卓构建铁律），实现放 mcp/app 层。
-
----
-
-## 0. 定位：谁是真相，谁是大脑
-
-一句话心智模型（**与早期"AI 投影覆盖"方案相反，那个方案已废弃**）：
-
-> **Notion 是你亲手打磨的真相；西西弗斯是它的大脑 + 传感器。** 西西弗斯只读地理解你的 LifeIndex、在旁边加"动作"，**绝不重写你的页面结构或生成 AI 味长文**。
-
-| 角色 | 承担 | 不承担 |
-|---|---|---|
-| **Notion（LifeIndex 页）** | 人类可读真相、你亲手排布的作战地图、知识页面 | 不是行为事件库、不驱动实时引擎 |
-| **西西弗斯 Core（本地 SQLite）** | 行为事件/干预/idle 的真相；Notion 的**只读本地索引**；主动引擎 | 不当 LifeIndex 结构的作者 |
-| **Codex（万能 inbox）** | 自然语言入口：一句话同时落 Notion（总结）+ Core（原始 log） | 不改你的分区结构 |
-
-**掌控力保证（机制层，不靠 AI 自觉）**：智能体对你 Notion 页的写操作被限制在一个**极窄白名单**（见 §2.4）；你的分区、层级、措辞、排版对智能体**只读**。
+上位文档：[architecture.md](architecture.md)（两平面 + 双存储）。主动触发见 [proactive-triggers.md](proactive-triggers.md)。Notion 连接器属于 app / MCP 适配层，**不进入 `sisyphus-core`**。
 
 ---
 
-## 1. Notion API 能力（你的诉求 1）
+## 0. 决策
 
-数据来源：Notion 官方开发者文档，当前推荐版本 **`2025-09-03`**。以下"能/不能"以该版本为准，具体配额以官方 [request-limits](https://developers.notion.com/reference/request-limits) 为准。
+> **Notion 是用户维护的个人上下文源；西西弗斯只读取、理解和缓存，不编辑 Notion。**
 
-### 1.1 基础读写
+本次架构调整废弃早期的 LifeIndex 双向流：
 
-- **页面 / 块（block）**：读取整页块树、追加子块（append）、更新单块（PATCH）、删除（归档）块。
-- **数据库（database）/ 数据源（data source）**：创建、查询（filter/sort）、读写行（页面）。
-- **搜索**：按标题搜页面 / 数据源（非全文，且有索引延迟）。
-- **文件上传 / Webhook**：支持文件上传接口；支持 Webhook 订阅变更事件（见 §3.1）。
+- 不创建或维护 `📥 Inbox`。
+- 不创建或维护 `🔄 NOW` / “下一项”挂件。
+- 不勾选、划线、追加、移动、归档或重写任何 Notion 内容。
+- 不要求用户为了智能体改成固定的 GTD / PARA / 数据库模板。
 
-### 1.2 AI（经 API）能生成的富文本 / 块 —— 比预想丰富
-
-| 块类型 | 能创建 | 用途举例（提升你的 Notion 体验） |
-|---|---|---|
-| `callout` | ✅ | 你现有的 ⏰🔑🔥 分区就是 callout，可带图标 + 背景色 |
-| `toggle` | ✅ | **折叠块**——藏答案做题卡、折叠长内容 |
-| `to_do` | ✅ | 复选框（你的行动项） |
-| `column_list` / `column` | ✅ | 多列并排布局（看板感、信息密度） |
-| `table` | ✅ | 简单表格（≠ 数据库） |
-| `equation` | ✅ | **KaTeX 公式**——写学习卡片、数学/ML 笔记 |
-| `code` | ✅ | 代码块（带语言高亮） |
-| `bookmark` / `embed` | ✅ | 链接卡片、嵌入（视频/网页） |
-| `table_of_contents` | ✅ | 页面目录 |
-| `quote` / `divider` / `headings 1-4` / 列表 | ✅ | 常规排版 |
-| `image` / `video` / `pdf` / `file` | ✅ | 媒体（可配文件上传） |
-| **数据库（inline / 独立）** | ✅ | 见 §1.4 智能表 |
-
-### 1.3 富文本注记（含删除线 —— 你的诉求 2）
-
-每段 rich text 可带注记：`bold` / `italic` / **`strikethrough`** / `underline` / `code` / `color`。
-
-- **删除线可在创建或更新块时设置**（`annotations.strikethrough = true`）。
-- **颜色**：文字色与背景色各 9 种（blue/brown/gray/green/orange/pink/purple/red/yellow）+ default。
-- ⇒ **你的诉求 2 完全可行**：Codex 侧确认完成一项 → 智能体 PATCH 对应 `to_do` 块：`checked=true` **且** 文本 `strikethrough=true`。**原文一字不删**，你事后手动清理。（详见 §2.4、§3.3）
-
-### 1.4 "智能表"= 数据库 / 数据源
-
-Notion 的智能表本质是**带计算属性的数据库**。`2025-09-03` 起引入**数据源（data source）**概念：一个 database 是容器，可含一个或多个 data source，查询走 `/v1/data_sources/:id/query`。
-
-API 能力：
-- ✅ 创建数据库、定义属性 schema：`select` / `status` / `date` / `relation`（关联）/ `rollup`（汇总）/ `formula`（公式）等。
-- ✅ 增删改查行、按属性 filter/sort 查询。
-- ⚠️ **公式/rollup 的计算结果由 Notion 算，API 只读**。你（或 AI）写的是公式**表达式**和关联关系，不是结果值。
-
-对本项目的意义：若你未来想让"行动项"支持按领域/精力过滤、用公式算"搁置天数"，可把行动项做成一个 **inline 数据库**（嵌在 LifeIndex 页内），西西弗斯读写它比读散列表更稳。**非必须**——默认走 §2 的 checkbox 约定即可零重构。
-
-### 1.5 交互能力的边界（硬限制，诚实告知）
-
-| 想做的交互 | 能否经 API 生成 | 替代方案 |
-|---|---|---|
-| 折叠藏答案的**题卡 / 闪卡** | ✅（`toggle`） | 直接生成 |
-| 勾选式练习、清单 | ✅（`to_do`） | 直接生成 |
-| 公式/代码/图文混排卡片 | ✅ | 直接生成 |
-| **原生按钮 `button`**（点一下执行动作） | ❌ 只读，创建报 `unsupported` | 用 checkbox / 外部链接兜底 |
-| **表单 `form`**（填空输入框、提交） | ❌ 同上 | 用数据库行代替"提交"，或 Notion 端手建 |
-| 同步块 `synced_block` | ⚠️ 能创建，**内容更新不支持** | 谨慎用 |
-| `link_preview` / 会议记录 | ❌ 只读 | — |
-
-**结论（诉求 1 的正面回答）**：AI **能**帮你生成相当丰富的富文本——折叠题卡、KaTeX 公式卡、多列看板、智能表、图文嵌入，足以把你的 Notion 体验"更上一层楼"。AI **不能**生成需要用户实时输入/点击执行的原生交互（按钮、表单、填空输入框）——这类是 Notion 客户端特权，API 造不出。想要"出填空题"，可行形态是**折叠块藏答案的题卡**，不是真输入框。
-
-### 1.6 限速与配额（决定"实时还是延迟"）
-
-- **速率**：平均约 **3 请求/秒**/集成，允许短时突发；超限返回 `429` + `Retry-After`。
-- **单次上限**（约）：一次 append ≤ **100** 个 block；单段 rich text ≤ **2000** 字；数组元素、URL 长度均有上限。
-- ⇒ **本集成全是低频单次写**（分钟级拉取、逐行 append、单块 PATCH），**离限速墙很远**。限速只有在"逐块实时镜像整页"时才炸——那正是 §5 明确舍弃的。
+智能体仍可在一次主动任务中推理出“此刻最适合做的一件事”，但它是**短暂的推荐结果**，只经宠物或系统通知展示，不成为 Notion 中的持久字段，也不回写完成状态。
 
 ---
 
-## 2. 同步契约（格式约定）
+## 1. 状态所有权
 
-智能体靠**你已在用的格式**确定性解析你的页面（零 AI 味），靠**约定的标记**知道你的意图。
+系统没有一个能覆盖所有数据的“唯一真相源”。事实按创建者和用途归属：
 
-### 2.1 页面分区语义（你现有结构 ≈ 已满足）
-
-| 页面元素 | 语义 | 谁写 |
-|---|---|---|
-| `<aside>` callout（⏰事项 / 🔑主线 / 🔥支线 …） | **领域 area**（行动的归属/上下文） | 只你 |
-| 缩进层级 | area → 子项的树 | 只你 |
-| `[ ]` / `[x]` `to_do` | **可行动项**，勾选=状态 | 你改；智能体可勾/划线 |
-| 链接（http…） | **知识引用** → 可同步进 vault/知识库 | 只你 |
-| `# Archive` 及其下 | **忽略区**，智能体不解析 | — |
-
-### 2.2 两个"智能体拥有"的挂件（放页面顶部）
-
-```
-🔄 NOW  ← 智能体维护的唯一【实时挂件】：看一眼就知道下一步
-   下一步：联系一个电吉他老师（~10min·低精力）
-   到期：21:00 吃药 ｜ 今日目标：推进 Notion 集成
-   —— 20:14 更新 · 触发：检测到你闲下来了
-
-📥 Inbox  ← 智能体唯一【append 区】：Codex 总结的想法落这里，你负责归档
-   · [Codex 20:03] 想研究"自动化提示词攻击框架" → 建议归入 🌳知识体系/AI安全
-```
-
-- **🔄 NOW**：确定性渲染的小挂件（非 AI 长文），数据来自 §3.3。这就是你要的"实时、看一眼知道下一步"。
-- **📥 Inbox**：只追加，绝不插进你的分区；归档权在你。
-
-### 2.3 可选标记（你决定哪些事被主动提醒）
-
-引擎默认能看到所有 checkbox，但**只主动推打了标记的**——推不推你说了算：
-
-```
-- [ ] 联系电吉他老师  #10min #低精力      ← 想被闲暇提醒，加标
-- [ ] 转AI Infra      #someday           ← 长期候选，不主动催
-- [ ] 申博：上交在职博？                    ← 不打标 = 只读不催
-```
-
-标记词表（可扩展）：时长 `#5min/#10min/#30min`；精力 `#低精力/#高精力`；`#someday`（暂缓）；`#now`（今日聚焦）。
-
-### 2.4 智能体写权限白名单（**全部**，超出即违规）
-
-1. 刷新 **🔄 NOW** 挂件（整块覆盖，仅此块）。
-2. 向 **📥 Inbox** **追加**行（绝不修改已有行、绝不插入其他区）。
-3. 勾选你已有的 `to_do`（`checked=true`）。
-4. 给已完成项加 **删除线**（`strikethrough=true`），**保留原文**，方便你手动清理。（诉求 2）
-
-> 你的分区结构、层级、措辞、非 NOW/Inbox 的任何内容 —— 对智能体**只读**。
-
----
-
-## 3. 三条信息流
-
-| 流向 | 机制 | 时效 | 破坏性 |
+| 状态 | 权威来源 | 谁能编辑 | 西西弗斯如何使用 |
 |---|---|---|---|
-| Notion → Core | 定时拉取(或 Webhook) → 确定性解析 → 更新本地索引 | 分钟级 | 只读 |
-| Codex → Notion | skill 总结 → append 到 📥Inbox + 同时 `capture` 进 Core | 近实时 | 仅追加 |
-| Core → Notion | 刷新 NOW；完成项勾选 + 删除线 | 近实时 | 白名单内 |
+| 用户写下的计划、目标、项目、复盘和文档 | Notion | **只有用户** | 只读拉取，生成本地镜像，供推理引用 |
+| 行为事件、idle、娱乐时长、干预和反馈 | 本地 SQLite | 采集器 / Core | 作为当前行为与节奏上下文 |
+| 知识卡片与长文 | Obsidian vault | 用户及获准的知识工作流 | 作为可选知识上下文 |
+| 主动建议、投递记录、冷却和近端结果 | 本地 SQLite | 西西弗斯宿主程序 | 防重复、评估提醒是否有效 |
 
-### 3.1 Notion → 西西弗斯（你改 LifeIndex，流入大脑）
-
-- **触发**：定时轮询（分钟级）；条件成熟时改用 Notion **Webhook**（`data_source.*` / `*.content_updated` 事件）降低延迟与请求数。
-- **解析**：按 §2.1 约定确定性地把块树映射为本地索引：callout→area、to_do→action(+状态+标记)、链接→知识引用。**读路径不调 LLM**（无 AI 味、可复现）。
-- **落地**：写入 Core 的**本地只读镜像表**（如 `notion_actions`：`block_id / area / title / checked / tags / updated_at`）。引擎读镜像，不读 Notion 实时——Notion 挂了引擎照跑。
-
-### 3.2 Codex → Notion（你聊想法，流回真相，不毁页面）
-
-- skill 拿到你一句话 → 生成**一行**总结 → 经 Notion MCP **append 到 📥Inbox** → 同时 `capture(text)` 写 Core（原始 log 溯源）。
-- 只 append，绝不改你的结构。归档进 🔑主线 之类由你手动完成（掌控力）。
-
-### 3.3 西西弗斯 → Notion（引擎的动作）
-
-- **NOW 刷新**：感知平面检测到闲暇（idle / 娱乐超时 / 冷却满足）→ 从本地镜像里挑一条 `#now` 或标记匹配的低精力短时长行动 + 到期提醒 + 今日目标 → 覆盖写 🔄NOW 块 + 端侧弹通知。
-- **完成回写**：你在提醒里点"做完了"或在 App 里完成 → PATCH 对应 `block_id`：`checked=true` + `strikethrough=true`。
-
-### 3.4 冲突与幂等
-
-- 智能体只碰**自己的两个挂件块 + 明确指定 block_id 的 to_do**；你编辑的是别的块 → Notion 按块粒度操作，冲突概率≈0。
-- 本地镜像以 `block_id` 为幂等键；拉取用"最后修改时间"做增量，避免全页重扫。
-- App 与 Notion 各存一份 → 天然多一层备份（比现状更可靠）。
+因此“西西弗斯状态和 Notion 同步”的准确含义是：**用户拥有的状态从 Notion 单向同步到本地只读镜像；系统产生的运行状态留在本地。** 两边不互相覆盖。
 
 ---
 
-## 4. LifeIndex 排版建议（你的诉求 3）
+## 2. 权限边界：机制保证，不靠提示词自觉
 
-你要的是**浏览器首页 / 屏保式**看板：信息丰富、条理分明、实时、一眼知道下一步。以下是成熟方法论 + 针对你现页面的建议。**保留你的风格，只做科学化微调，你保留最终决定权。**
+### 2.1 Notion 连接
 
-### 4.1 可借鉴的成熟方法论
+- Notion integration 只申请内容读取能力，只共享用户明确选择的页面 / 数据源。
+- 凭据放在 OS Keychain / Secret Store，不写 SQLite、日志或 agent prompt。
+- 主动智能体只拿到 `list/read/query` 形态的只读连接器；**不得给它挂通用的、含 create/update/delete 能力的 Notion MCP**。
+- 连接器在运行时拒绝所有写方法。即使模型生成了写操作，也无法执行。
 
-| 方法论 | 核心思想 | 对你有用的点 |
-|---|---|---|
-| **GTD**（David Allen） | 收件箱 → 理清 → **下一步行动(next action)** + **情境(context)** | 每个项目都要有一个"具体的下一步"；按情境/精力/时长筛选 → **直接喂西西弗斯主动引擎** |
-| **PARA**（Tiago Forte《Building a Second Brain》） | Projects / Areas / Resources / Archive 四分 | 分清**项目**(有终点，如"国赛")与**领域**(长期维护，如"健康")——你现在混在一起了 |
-| **PPV（Pillars-Pipelines-Vaults）**（August Bradley，Notion 界最著名 Life OS） | 支柱(长期领域) → 管道(流转的任务) → 库(知识)，配一个 **Dashboard/"Now" 视图** | 你的 🔄NOW 挂件正是 PPV 的"当下面板"思想；支柱=你的 🔑主线/🔥支线 |
-| **Bullet Journal** | 快速记录 + 迁移(migration) + 符号系统 | 你的 checkbox/符号习惯；未完成项定期"迁移"而非堆积 |
-| **MOC（Map of Content）** | 用一张索引页链接零散笔记 | 你的 🌳知识体系页就是一张 MOC |
+### 2.2 本地写入
 
-### 4.2 对你现页面的诊断（不改你的美学，只指出"类型混淆"）
+“智能体只读”特指智能体对用户内容源只读。宿主程序仍可确定性地写本地运行元数据，例如同步游标、镜像快照、通知投递结果和用户反馈；这些写入不改变用户的 Notion 内容。
 
-你现页面把 5 种不同的东西放在了同一层级，导致"看一眼不知道下一步"：
+---
 
-- **领域(area)**：本职工作、健康计划、社交 —— 长期维护，无终点。
-- **项目(project)**：国赛、毕昇杯、申博 —— 有明确终点。
-- **行动(next action)**：CTF环境准备、联系老师 —— 今天/本周能动手的。
-- **研究问题**："端侧AI的市场是否存在" —— 这是问题不是任务。
-- **观察/感想**："购买陪伴太几把贵了"、"陌生人社交很费精力" —— 应先进 Inbox。
+## 3. 可替换的信息源适配器
 
-### 4.3 建议的精炼结构（保留你的 callout 风格）
+Notion 是当前首选信息源，但存储和推理层不应写死 `notion_actions`。app / MCP 适配层提供统一只读接口：
 
-```
-🔄 NOW（智能体维护）              ← 实时，一眼知道下一步
-📥 Inbox（智能体 append，你归档）  ← 零散想法先落这
-
-🎯 本周聚焦（≤3 项，你手选）        ← 你自己每周挑的 project 下一步
-   - [ ] 国赛 → CTF环境准备  #now #30min
-
-⏰ 项目（有终点）                  ← 国赛/毕昇杯/申博…每个都带一个"下一步"
-🔑 领域（长期维护）                ← 工作/健康/社交/美育/财务…
-🔥 支线：对抗孤独                  ← 保留你的人生主题分区
-💭 Someday / 研究问题             ← "端侧AI市场?" 这类，不催不删
-🌳 知识体系（MOC）                ← 链接 → 同步进 vault
-# Archive                        ← 忽略区
+```text
+ContextSource
+  refresh(scope, cursor?) -> RefreshResult
+  read_context(scope, limit) -> ContextItem[]
+  health() -> SourceHealth
 ```
 
-要点：① 每个**项目**下挂一个具体**下一步行动**（GTD 铁律）；② **研究问题/观察**从任务里拎出来，不再假装是待办；③ **本周聚焦**是你手选的 ≤3 项，NOW 挂件从这里优先取。
+首个实现是 `NotionContextSource`；以后可接本地 Markdown、日历或其他任务工具，而不修改调度器和推理协议。
 
-### 4.4 和西西弗斯引擎的接法（方法论落到代码）
+适配器将外部内容归一成一个**只读上下文信封**，同时保留原始引用：
 
-GTD 的**情境(context)**就是主动引擎的输入：把 `#低精力 #10min` 这类标记当"情境标签"，引擎在检测到"下班+闲暇+低精力时段"时，只从匹配情境的行动里挑一条推给你——这就是"闲暇时提醒你推进一件小事"的方法论依据。**你负责给行动打情境标记（掌控），引擎负责挑时机（自动）。**
+```json
+{
+  "source": "notion",
+  "connection_id": "personal-notion",
+  "external_id": "page-or-block-id",
+  "kind": "page|database_row|todo|text",
+  "title": "用户原文标题",
+  "content": "用户原文或确定性提取文本",
+  "status": "可选，按源原样映射",
+  "due_at_ms": null,
+  "tags": [],
+  "source_updated_at_ms": 0,
+  "observed_at_ms": 0,
+  "content_hash": "..."
+}
+```
+
+原则：
+
+- 原文优先，不让 LLM 在同步阶段改写用户内容。
+- 字段缺失就留空，不强迫用户采用特定排版。
+- 每条上下文都带来源、外部 ID、源更新时间和观测时间，推荐结果可以溯源。
+- 大页面可按块 / 段落切片，但切片只是可重建投影，不是新的权威内容。
 
 ---
 
-## 5. 落地边界与舍弃项
+## 4. 本地镜像：缓存，不是第二个编辑面
 
-1. ❌ 非毫秒实时，分钟级拉取（本地镜像兜底）。
-2. ❌ 智能体只理解格式契约内的部分；纯自由散文当背景不解析。
-3. ❌ Codex→Notion 只进 Inbox，不自动归档进分区（归档是你的手动动作 = 掌控）。
-4. ❌ 不生成原生按钮/表单/输入框（API 硬限制）；交互靠折叠块/checkbox/数据库模拟。
-5. ✅ 保留：地图归你、边看边改、心血不被 AI 生成、常用 app 信息流动、一眼知下一步、多份备份、schema 可重建。
+建议在适配层新增两类通用表，而不是 Notion 专用 artifact：
+
+```sql
+CREATE TABLE source_connections (
+  id                  TEXT PRIMARY KEY,
+  kind                TEXT NOT NULL,          -- notion | markdown | calendar | ...
+  access_mode         TEXT NOT NULL,          -- 必须为 read_only
+  scope_json          TEXT NOT NULL,          -- 用户授权的 page/data-source id；不含密钥
+  enabled             INTEGER NOT NULL DEFAULT 1,
+  last_attempt_at_ms  INTEGER,
+  last_success_at_ms  INTEGER,
+  last_error          TEXT
+);
+
+CREATE TABLE source_snapshots (
+  connection_id       TEXT NOT NULL,
+  external_id         TEXT NOT NULL,
+  kind                TEXT NOT NULL,
+  source_updated_at_ms INTEGER,
+  observed_at_ms      INTEGER NOT NULL,
+  content_hash        TEXT NOT NULL,
+  payload_json        TEXT NOT NULL,
+  deleted_at_ms       INTEGER,
+  PRIMARY KEY (connection_id, external_id)
+);
+```
+
+这些表是**可丢弃、可重建的读取缓存**，不属于 Artifact store 的用户事实。Notion 仍是用户内容的权威来源。同步器可以更新 `source_snapshots`；agent 只能读取它。
+
+推荐、投递、用户响应继续记录在本地 `scheduled_actions` / `interventions` 等运行表中。不要为了 Notion 再造一套任务真相。
 
 ---
 
-## 6. 实现组件
+## 5. 主动任务信息流
 
-- `notion_indexer`（新增，放 mcp/app 层，**不进 core**）：定时拉取 → 解析 → 写本地镜像表；粗回写（NOW/checkbox/删除线/Inbox append）。与 `vault.rs`（真相↔文件）同类，方向为 Notion→本地。
-- **Codex 侧**：在用户的 Codex/Claude 里挂官方 **Notion MCP** + 既有 **sisyphus-mcp**；skill 编排"一句话 → append Notion Inbox + capture Core"。
-- **本地镜像表**：`notion_actions`(block_id 幂等键 / area / title / checked / tags / updated_at) 等，由 indexer 维护，引擎只读。
+```text
+时间 / 行为规则触发
+  → scheduled_actions: agent_run(mode=proactive_recommendation)
+  → 宿主并行读取本地 query_context + 刷新已启用的只读 ContextSource
+  → 用本次新结果更新 source_snapshots
+  → agent 读取“本地状态 + 新鲜外部上下文 + 历史反馈”
+  → 只生成 1 条结构化推荐（不调用 Notion 写 API）
+  → 宿主执行防打扰 / 去重 / 隐私校验
+  → 宠物气泡和/或系统通知推送给用户
+  → 点击、忽略及 10/30 分钟近端结果只回写本地
+```
 
-> Notion 官方 MCP、rich text/block/data-source API、request-limits 为外部依赖；版本以 `2025-09-03` 为基线，升级前先核对 [upgrade-guide](https://developers.notion.com/docs/upgrade-guide-2025-09-03)。
-</content>
-</invoke>
+建议的 `agent_run` payload：
+
+```json
+{
+  "mode": "proactive_recommendation",
+  "sources": ["local", "notion"],
+  "source_freshness": "refresh_before_reasoning",
+  "max_recommendations": 1,
+  "delivery": ["pet", "notification"],
+  "scope": "personal"
+}
+```
+
+agent 的输出是数据，不直接产生副作用：
+
+```json
+{
+  "title": "现在可以推进一小步",
+  "body": "花 10 分钟整理毕昇杯验证记录。",
+  "reason": "你刚进入空闲窗口，Notion 中该项目今天有更新。",
+  "source_refs": ["notion:page-or-block-id"],
+  "suggested_duration_min": 10
+}
+```
+
+推荐必须引用实际上下文，只给一件事；没有足够依据时允许输出 `no_recommendation`，不能为了完成定时任务而硬推。
+
+---
+
+## 6. 刷新、同步与冲突
+
+### 6.1 刷新策略
+
+- **主动任务前强制刷新**：每次推理前读 Notion API，确保用户刚改的内容能进入本次判断。
+- **后台增量刷新（可选）**：轮询或 Webhook 只负责让缓存更热；Webhook 到达后仍由连接器读取最新对象。
+- 使用 `external_id + source_updated_at + content_hash` 幂等更新镜像。
+- API 限流按 `Retry-After` 退避；分页和增量游标由连接器封装。
+
+### 6.2 离线与陈旧数据
+
+- Notion 临时不可用时，可回退到最后一次成功快照，但必须把 `last_success_at` 传给 agent。
+- 超过用户配置的陈旧阈值（默认建议 24 小时）时，不基于该源生成具体任务；可跳过本次推送。
+- 读取失败不影响本地行为干预和固定提醒。
+
+### 6.3 冲突模型
+
+因为同步方向只有 `Notion → 本地镜像`，不存在双向写冲突。用户删除或移动内容后，下一次刷新将镜像标记为删除 / 越界；本地历史推荐保留 source ref 供审计，但不得把旧内容写回 Notion。
+
+---
+
+## 7. 隐私与可观测性
+
+- 用户按页面 / 数据源授权，默认不扫描整个 workspace。
+- 日志只记录 object id、耗时、条数、hash 和错误码，不记录页面正文。
+- 进入模型的内容遵守 [protocol.md](protocol.md) 隐私等级；敏感页可排除或只做本地推理。
+- 每次主动推荐记录：触发原因、使用的数据源、各源新鲜度、source refs、最终渠道和用户响应。
+- 设置页应能看到连接健康度、上次成功同步时间，并可一键停用 / 清空本地镜像；停用不改 Notion。
+
+---
+
+## 8. MVP 与验收
+
+### 现状（2026-07）：MVP 已接入，走 agent 直连而非本地镜像
+
+实现路径比 §3/§4 描述的 `NotionContextSource`/`source_snapshots` 更薄：两个基座（Pi/Codex）各自
+接入官方 **`@notionhq/notion-mcp-server`**（Pi 侧 `pi-agent-runtime.mjs` 起第二个 MCP client 合并
+工具面；Codex 侧 `agent_runtime.rs` 用 `-c mcp_servers.notion.*` 注入）。**只读边界由 Notion 侧的
+integration 权限机制保证**——设置页引导用户建 token 时只勾 "Read content"，即使模型误调用写工具，
+Notion API 会直接拒绝，不靠我们代码或提示词自觉（守住 §2.1 的铁律，只是执行点在 Notion 侧而非本地
+适配层）。Token 存 `data_dir/notion_config.json`（0600，同 `llm_config.json` 模式）。
+
+**与原设计的差异（已知简化，非最终态）**：
+- 没有本地 `source_snapshots` 镜像/缓存——agent 每次直接实时调用 Notion 工具读取，不经确定性同步器刷新游标。
+- 没有页面范围白名单校验在我们代码里做——范围完全由用户在 Notion 侧 Share 给 integration 的页面决定。
+- 设置页只显示 token 有无，不显示"最后同步时间/错误状态"（因为没有本地同步这一步）。
+
+`source_snapshots` 缓存留作后续（若直连延迟/速率限制成为问题再补）。
+
+### MVP
+
+1. 只读 `NotionContextSource`：限定页面范围，支持分页、刷新和本地快照。
+2. `proactive_recommendation` agent job：同时读取 `query_context` 与刷新后的 Notion 上下文。
+3. 结构化推荐经宠物 / 系统通知投递；反馈和投递结果仅存本地。
+4. 设置页展示只读权限、授权范围、最后同步时间和错误状态。
+
+### 架构验收条件
+
+- 用只读凭据运行，系统仍能完成“触发 → 读取两类上下文 → 推理 → 推送”闭环。
+- 代码和 agent 工具面不存在 Notion create / update / append / delete 路径。
+- 用户在 Notion 修改内容后，下一次主动任务能读到新版本；Notion API 失败时能清楚降级。
+- 更换为另一个 `ContextSource` 不需要修改 scheduler / agent 输出 / delivery 协议。
+- 宠物和系统通知消费同一份推荐结果，不各自重复推理。
+
+---
+
+## 9. 明确不做
+
+- 不把西西弗斯做成 Notion 编辑器或任务管理器。
+- 不维护 Notion Inbox、NOW、下一项或 AI 生成看板。
+- 不从通知按钮回写 Notion 完成状态。
+- 不把 Notion 当行为事件库，也不把本地行为数据反向同步进 Notion。
+- 不承诺毫秒实时；主动任务前的新鲜读取比常驻高频轮询更重要。

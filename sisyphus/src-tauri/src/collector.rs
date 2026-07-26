@@ -11,14 +11,14 @@ use std::time::Duration;
 
 use chrono::Utc;
 use rusqlite::Connection;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 use tauri_plugin_notification::NotificationExt;
 
 use sisyphus_core::category::categorize;
+use sisyphus_core::db;
 use sisyphus_core::ingest::{ingest_event, NewEvent};
 use sisyphus_core::rule_engine::config::RuleConfig;
 use sisyphus_core::rule_engine::{RuleContext, RuleEngine};
-use sisyphus_core::db;
 
 const DEVICE_ID: &str = "macos-desktop";
 const USER_ID: &str = "local-user";
@@ -71,8 +71,6 @@ fn tick(
     };
     // 统一分类（用户表 + 内置白名单，热生效）。
     let category = categorize(conn, &front).map_err(|e| e.to_string())?;
-    eprintln!("[collector] front={front} category={category:?}");
-
     // 前台 app 变化：关闭上一段会话，写成 app_foreground 区间事件。
     let changed = session.as_ref().map(|s| s.bundle != front).unwrap_or(true);
     if changed {
@@ -91,6 +89,8 @@ fn tick(
         Some(s) if is_entertainment(s.category.as_deref()) => now - s.start_ms,
         _ => 0,
     };
+    // 当前前台会话总时长（不限分类），供动态规则补入未闭合会话。
+    let active_session_ms = session.as_ref().map(|s| now - s.start_ms).unwrap_or(0);
 
     let today = Utc::now().format("%Y-%m-%d").to_string();
     let goal = db::get_today_goal(conn, &today).map_err(|e| e.to_string())?;
@@ -102,6 +102,7 @@ fn tick(
         current_app: Some(front),
         current_category: category.clone(),
         active_entertainment_ms: active_ms,
+        active_session_ms,
         media_playing_since_ms: 0,
         recent_scroll_count: 0,
         today_goal: goal,
@@ -110,8 +111,17 @@ fn tick(
     if let Some(out) = sisyphus_core::intervention::evaluate_and_record(conn, engine, &ctx)
         .map_err(|e| e.to_string())?
     {
-        notify(app, &out.message);
-        eprintln!("[collector] 干预触发 rule={} sev={}", out.rule_id, out.severity);
+        // ResponsePolicy::Immediate 的命中当拍派发；Deferred/Debounce 已入队交给 ticker。
+        match out.kind.as_str() {
+            "pet_message" => {
+                let _ = app.emit("pet-message", out.message.clone());
+            }
+            _ => notify(app, &out.message),
+        }
+        eprintln!(
+            "[collector] 干预触发 rule={} sev={} kind={}",
+            out.rule_id, out.severity, out.kind
+        );
     }
 
     // 到期提醒：到点弹通知（原子标记 fired 防重复）。
