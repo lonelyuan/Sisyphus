@@ -30,7 +30,7 @@
 
 - **InputBox（无压力记录）—— 总入口**：兼容跨端输入源（Codex、Notion，后续加西西弗斯 APP 本地输入），把任意一句话原样接住（`capture`）。经**意图识别智能体**（现为 Codex/Claude runtime，后期自建 Agent 底座）做**功能路由**，调对应模块。
 - **模块一 · 狭义西西弗斯（习惯培养 / 对抗拖延）**：采集端 → 行为日志库 → 习惯引擎（规则 / ML）→ 提醒干预端。项目最早的闭环，即感知平面。
-- **模块二 · LifeIndex（人生看板）**：用户按自己的习惯在 Notion 维护短期 Todo、长期目标、个人发展、研究问题等内容；它是主动智能体的一个**只读上下文源**。智能体不维护 Inbox / NOW /“下一项”，只在触发时结合本地状态推理一条临时建议，经宠物或通知展示。见 [notion-integration.md](notion-integration.md)。
+- **模块二 · LifeIndex（人生看板）**：SQLite LifeDB 保存 idea/goal/project/action/routine 及关系；App 提供事项/日常/主线/支线四个严格重叠视图；Notion 是用户可自由编辑的普通文本输入/投影。隔离的 LifeIndexSync Agent 做三方语义合并。见 [notion-integration.md](notion-integration.md)。
 - **模块三 · 第二大脑（知识库 / 知识图谱）**：以 Markdown vault 为存储介质，配调研 / 验证 / 梳理智能体构建个人知识库；后续可派生知识图谱（图数据库）。
 
 > InputBox / 意图识别 / 三模块是**产品组件视图**，不改变 §2 的双存储与 §3 的 `ingest_event` 唯一契约：InputBox = `capture`，意图识别 = `propose_intents`，模块产物落 Artifact store 或 vault。**被动采集不经 InputBox**，直接进狭义西西弗斯（感知平面）。
@@ -91,7 +91,7 @@
 
 - 可变、有生命周期、有 status 的对象：`goals`、`tasks`、`notes`、`interventions`、`knowledge_nodes` 等，**各自建表**。
 - **禁止**造一张多态大表 `artifacts` 用 type 字段兜住目标+任务+笔记+知识节点——那是过度抽象，是"Core 推不动"的病根。
-- 关系（树 / 图）在真正需要时再用一张 `artifact_relations` 承载，**不提前造**。
+- LifeDB 只统一人生规划域，并用 `life_item_edges` 承载目标→项目→行动/日常等关系；其它 artifact 不塞进 LifeItem。
 
 ### 2.3 一条铁律
 
@@ -100,16 +100,16 @@
 
 一条 capture 事件（进 Event log）经"意图提取"这一步，产出 / 更新某张 Artifact 表——这是两存储之间唯一的桥。
 
-### 2.4 外部信息源镜像（可重建投影）
+### 2.4 LifeDB 与外部文本投影
 
-Notion、日历等用户既有工具不并入 Event log，也不被复制成新的本地任务真相。app / MCP 适配层通过统一只读 `ContextSource` 拉取内容，缓存为带 `source / external_id / source_updated_at / observed_at / hash` 的 `source_snapshots`。
+LifeDB 是人生规划域的本地事实层。Notion 不进入 Event log，也不承载结构约束；它是同一 LifeIndex 的用户可编辑 Markdown 投影。
 
-- 用户内容的权威来源仍是原工具；Notion 中全部文档只有用户编辑。
-- `source_snapshots` 只是可丢弃、可重建的读取缓存，不是 Artifact store。
-- 主动任务前刷新启用的信息源，再把镜像与本地 `query_context` 一起交给 agent。
-- 系统只把推荐、投递、反馈和冷却等运行状态写回本地，不反向覆盖外部源。
+- Core 确定性维护 LifeItem 枚举、关系、revision、dirty 状态和成功快照。
+- Agent 对比 Notion 当前文本、上次成功快照和 LifeDB 当前行，负责模糊文本到结构字段的语义编译。
+- `life_item_external_refs` 与 `life_sync_state` 保留来源和审计；凭据不进 SQLite。
+- 受限网关把 Notion 读写固定到用户配置的唯一页面；普通主动任务只读。
 
-完整的所有权、权限和降级语义见 [notion-integration.md](notion-integration.md)。
+完整的所有权、并发和降级语义见 [notion-integration.md](notion-integration.md)。
 
 ---
 
@@ -221,7 +221,7 @@ Android 采集源以 Kotlin Tauri 插件形式接入 `sisyphus/`，见 [android-
 总原则：**敏捷开发、充分复用现成工具，但在架构上保留后续换成自研的可拓展性。**
 
 1. **智能体基座可换**：现阶段用 Codex / Claude Code 作基座，智能体能力一律沉淀为 **skill / MCP / CLI / SDK**；通用智能体亦作前期主入口。后期整体替换为自研 Agent 底座——**替换的只是交互前端，Core 经 MCP 暴露的能力契约不变**（见 §4）。
-2. **自建存储 + 生态信息源并存**：SQLite 保存本地事件与系统运行状态；用户选择的工具保存用户内容。通过只读 `ContextSource` + 可重建镜像接入 Notion，尊重用户原有习惯，既不要求迁移，也不让 agent 编辑原文（见 [notion-integration.md](notion-integration.md)）；知识库用 **Obsidian Markdown vault**，后续可派生知识图谱（图数据库）。
+2. **自建存储 + 生态投影并存**：SQLite LifeDB 保存结构化人生规划；Notion 保留用户熟悉的自由文本交互，由受限 Agent 双向合并，但不依赖 Notion 数据库能力。知识库用 **Obsidian Markdown vault**，后续可派生知识图谱（图数据库）。
 3. **先验证，再"真正用起来"**：先验证前期架构可行性，通过后再追求日常可用性与产品形状。
 
 **长期规划暂缓（明确克制，验证期不碰）：**
@@ -229,7 +229,7 @@ Android 采集源以 Kotlin Tauri 插件形式接入 `sisyphus/`，见 [android-
 | 模块 | 暂缓项 |
 |---|---|
 | 狭义西西弗斯 | IoT / 可穿戴端采集、跨端同步、RL 跨端学习 |
-| LifeIndex | 无极时间线、技能树（LifeIndex 自建前端） |
+| LifeIndex | 无极时间线、技能树、跨用户服务端同步 |
 | 第二大脑 | 知识图谱（图数据库）派生 |
 
 ---
@@ -242,13 +242,13 @@ Android 采集源以 Kotlin Tauri 插件形式接入 `sisyphus/`，见 [android-
 
 **分层守铁律**：
 - **`sisyphus-core::scheduler`**：队列纯数据逻辑（enqueue / due_actions / mark_fired / reschedule），纯 rusqlite、无副作用，安卓可编。
-- **app（感知平面常驻）**：ticker 到点取 `due_actions` → 按 `kind` 执行**平台相关副作用**（`notify` 弹通知 / `pet_message` 展示宠物气泡 / `agent_run` 拉起 codex）。主动任务前由 app / MCP 适配层刷新只读外部信息源；`tokio`/进程/通知**绝不进 core**。
+- **app（感知平面常驻）**：ticker 到点取 `due_actions` → 按 `kind` 执行**平台相关副作用**（`notify` 弹通知 / `pet_message` 展示宠物气泡 / `agent_run` 拉起 Agent）。LifeIndex 修改会入队受限双向同步；`tokio`/进程/通知**绝不进 core**。
 - **规则引擎 → 响应规划器**：finding → `ResponsePolicy`(Immediate/Deferred/Debounce/Suppress) → `core::enqueue_action`。这是"立即 vs 延后 vs 防打扰"的可拓展 seam。
 
 **“何时触发”是确定性的活（在 app/引擎），“建议什么”才是 agent 的判断；最终是否打扰还要过宿主的冷却、去重和隐私策略**——别把判断塞进调度器（呼应 §1.1）。
 
-**打通本地状态 + Notion → 主动推送**：主动队列触发 `agent_run(mode=proactive_recommendation)`；宿主读取 `query_context` 并刷新 Notion 只读镜像；agent 返回一条带来源的结构化建议或 `no_recommendation`；宿主再把同一结果投递到宠物 / 系统通知。Notion 只参与输入，点击通知和完成状态只记本地，绝不回写用户文档。
+**LifeIndex 双向同步**：每日或 LifeDB 变更触发 `agent_run(mode=lifeindex_sync)`；Agent 经受限网关读取唯一 Notion 页面，三方合并后更新 LifeDB，再把 Core 生成的普通 Markdown 写回该页。其它主动建议仍使用 `RunMode::Proactive`，只读且只返回一条建议。
 
-**现状（2026-07）**：调度器骨架、`ResponsePolicy` seam、`notify`/`pet_message`/`agent_run` 执行器、动态检测规则（`detection_rules` + `DynamicRule`，“一句话建规则”）、看板刷新（`lifeindex_refresh`）均已落地；Pi 与 Codex 两基座连同一 `sisyphus-mcp`、工具面一致、写门禁按 `RunMode` 区分（见 [agent.md](agent.md)）。
+**现状（2026-07）**：调度器骨架、`ResponsePolicy` seam、`notify`/`pet_message`/`agent_run` 执行器、动态检测规则和 LifeIndexSync 均已落地；Pi 与 Codex 两基座连同一 `sisyphus-mcp`，工具面按 `Interactive / Proactive / LifeIndexSync` 运行模式白名单隔离（见 [agent.md](agent.md)）。
 
 完整数据模型、响应策略、执行器、可靠性与 MVP 边界见 [proactive-triggers.md](proactive-triggers.md)。

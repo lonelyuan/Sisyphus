@@ -7,7 +7,7 @@ cd sisyphus/src-tauri && cargo build --release -p sisyphus-mcp
 # 产物：sisyphus/src-tauri/target/release/sisyphus-mcp
 ```
 
-## 2. 注册进你自己的 Codex / Claude
+## 2. 注册进 Codex，并按项目限制工具面
 
 **Codex**（`~/.codex/config.toml`，路径换成上面产物的绝对路径）：
 
@@ -15,14 +15,16 @@ cd sisyphus/src-tauri && cargo build --release -p sisyphus-mcp
 [mcp_servers.sisyphus]
 command = "/ABS/PATH/TO/sisyphus-mcp"
 args = []
+enabled = true
 # 可选：覆盖 DB / 知识库路径（默认与桌面 App 同库：~/Library/Application Support/com.sisyphus/）
 # env = { SISYPHUS_DB = "/path/sisyphus.db", SISYPHUS_VAULT = "/path/vault" }
 ```
 
-Claude Code / 其它 MCP 客户端填等价的 stdio server 配置。重启后应能看到 `sisyphus` 的工具：
-`capture` · `list_captures` · `propose_intents` · `accept_intent` · `ignore_intent` · `query_context` · `today_actions` · `set_goal` · `ingest_document` · `write_knowledge_note` · `search_knowledge` · `list_knowledge` · `list_monitored_apps` · `add_monitored_app` · `remove_monitored_app`。
+在 Sisyphus 仓库的 `.codex/config.toml` 用 `enabled_tools` 只开放 Core/意图工具，例如 `capture`、`list_captures`、`propose_intents`、`accept_intent`、`ignore_intent`、`query_context`、`today_actions`、`set_goal`、监控和检测规则工具；不要开放 `ingest_document`、`write_knowledge_note`、`search_knowledge`、`list_knowledge` 等知识库工具。
 
-把本 skill（`SKILL.md` + `references/`）放进你的 skills 目录即可作为一站式入口。
+Claude Code / 其它 MCP 客户端填等价的 stdio server 配置。
+
+把本 skill 通过仓库级 `.agents/skills/sisyphus` 暴露，只在 Sisyphus 项目使用；不要链接到用户级 skills 目录。
 
 ## 3.（可选）每日例程设成定时任务
 
@@ -40,7 +42,7 @@ Claude Code / 其它 MCP 客户端填等价的 stdio server 配置。重启后�
   <array>
     <string><CODEX_BIN></string>
     <string>exec</string>
-    <string>用 sisyphus 做今日规划：先 query_context；若配置了只读 Notion 上下文源，刷新并读取用户更新但绝不写 Notion；再结合未处理 capture，只推荐一个最小目标并 set_goal。</string>
+    <string>用 sisyphus 做今日规划：先 query_context 和 list_life_items，再结合未处理 capture，只推荐一个最小目标并 set_goal；普通规划模式不要写 Notion。</string>
   </array>
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
@@ -57,7 +59,7 @@ launchctl load ~/Library/LaunchAgents/com.sisyphus.morning-plan.plist
 launchctl load ~/Library/LaunchAgents/com.sisyphus.evening-review.plist
 ```
 
-> 定时任务只是到点拉起 Codex 跑例程；本地状态读写走 `sisyphus` MCP。Notion 若接入，只能通过只读连接器作为信息源，不得给主动任务暴露 create / update / append / delete 工具。
+> App 自带的每日 8:30 `LifeIndexSync` 负责 Notion 双向同步，不需要 launchd。上面的规划/复盘任务保持只读；只有隔离的同步模式会拿到固定单页替换工具。
 
 ## 4.（可选）知识 agent 派发（第二大脑深研）
 

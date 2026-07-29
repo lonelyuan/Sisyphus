@@ -20,6 +20,7 @@ pub mod intervention;
 pub mod timeline;
 pub mod scheduler;
 pub mod lifeindex;
+pub mod lifedb;
 
 pub use ingest::{ingest_event, capture_text, NewEvent};
 pub use rule_engine::{DailyGoal, Finding, RuleContext, RuleEngine};

@@ -73,9 +73,14 @@ fn seed_daily_jobs(conn: &rusqlite::Connection) {
         Err(e) => eprintln!("[scheduler] seed job failed: {e}"),
     }
 
-    // 每日 8:30 看板刷新：agent 只读参考 Notion + 本地上下文 → 更新本地 LifeIndex 看板。
+    // 取消旧版单向只读刷新，迁移到每日双向 LifeIndexSync。
+    let _ = conn.execute(
+        "UPDATE scheduled_actions SET status='cancelled'
+         WHERE dedup_key='daily-lifeindex-refresh' AND status='pending'",
+        [],
+    );
     let li_due = scheduler::next_due("daily@08:30", now).unwrap_or(now);
-    let li_payload = r#"{"mode":"lifeindex_refresh","topic":"刷新人生看板：只读参考 Notion 与本地上下文，用 upsert_lifeindex_card 更新长期目标/今日焦点/研究问题/个人发展等分区"}"#;
+    let li_payload = r#"{"mode":"lifeindex_sync","topic":"三方语义合并 LifeDB、Notion 当前文本与上次成功快照，并把严格四视图投影写回 Notion"}"#;
     match scheduler::enqueue_action(
         conn,
         &NewAction {
@@ -83,12 +88,12 @@ fn seed_daily_jobs(conn: &rusqlite::Connection) {
             payload_json: li_payload,
             due_at_ms: li_due,
             recurrence: Some("daily@08:30"),
-            dedup_key: Some("daily-lifeindex-refresh"),
+            dedup_key: Some("daily-lifeindex-sync"),
             origin_event_id: None,
             created_by: "scheduler",
         },
     ) {
-        Ok(Some(id)) => eprintln!("[scheduler] 播种每日8:30看板刷新 job: {id}"),
+        Ok(Some(id)) => eprintln!("[scheduler] 播种每日8:30 LifeIndex 双向同步 job: {id}"),
         Ok(None) => {}
         Err(e) => eprintln!("[scheduler] seed lifeindex job failed: {e}"),
     }
@@ -189,8 +194,8 @@ fn spawn_agent_run(db_path: &PathBuf, data_dir: &PathBuf, app: &AppHandle, a: &S
     });
 }
 
-/// 运行只读/看板 Agent，按 payload 的 mode 分派。proactive_recommendation → 投递一条建议；
-/// lifeindex_refresh → 让 agent 只读 Notion + 本地上下文后更新本地看板（不推通知）。
+/// 运行只读/同步 Agent。proactive_recommendation → 投递一条建议；
+/// lifeindex_sync → Agent 在受限网关内双向合并 LifeDB 与唯一 Notion 页面。
 fn do_agent_run(
     conn: &rusqlite::Connection,
     data_dir: &PathBuf,
@@ -205,25 +210,44 @@ fn do_agent_run(
         .and_then(|ctx| serde_json::to_string(&ctx).ok())
         .unwrap_or_else(|| "{}".to_string());
 
-    if mode_str == "lifeindex_refresh" {
+    if matches!(mode_str, "lifeindex_sync" | "lifeindex_refresh") {
+        let Some(target_id) = agent_runtime::notion_sync_target(data_dir) else {
+            // 未启用同步是合法状态：每日 job 保留，等用户配置后自然生效。
+            eprintln!("[scheduler] LifeIndex 同步未配置，本轮跳过");
+            return true;
+        };
+        let started_at = chrono::Utc::now().timestamp_millis();
         let prompt = format!(
-            "定时看板刷新任务。{topic}\n本地状态快照：{local}\n\
-             请只读参考已配置的 Notion 源与本地上下文，用 upsert_lifeindex_card 更新看板；\
-             不要修改 Notion，也不要调用其它本地写工具。"
+            "定时 LifeIndex 双向同步。{topic}\n目标 page id：{target_id}\n本地今日快照：{local}\n\
+             严格执行三方合并；保留 Notion 中全部用户事项；写回成功后必须 complete_lifeindex_sync。"
         );
         return match agent_runtime::run_agent(
             data_dir,
             &prompt,
             None,
             None,
-            agent_runtime::RunMode::LifeIndex,
+            agent_runtime::RunMode::LifeIndexSync,
         ) {
             Ok(out) => {
-                eprintln!("[scheduler] {} 看板刷新完成", out.runtime);
-                true
+                let completed = sisyphus_core::lifedb::get_sync_state(conn, "notion", &target_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|state| state.last_success_at_ms)
+                    .is_some_and(|at| at >= started_at);
+                if completed {
+                    let _ = app.emit("lifeindex-updated", ());
+                    eprintln!("[scheduler] {} LifeIndex 双向同步完成", out.runtime);
+                    true
+                } else {
+                    let error = "Agent 已结束，但没有完成 Notion 写回确认";
+                    let _ = sisyphus_core::lifedb::fail_sync(conn, &target_id, error);
+                    eprintln!("[scheduler] lifeindex_sync incomplete: {error}");
+                    false
+                }
             }
             Err(e) => {
-                eprintln!("[scheduler] lifeindex_refresh failed: {e}");
+                let _ = sisyphus_core::lifedb::fail_sync(conn, &target_id, &e);
+                eprintln!("[scheduler] lifeindex_sync failed: {e}");
                 false
             }
         };
@@ -235,8 +259,13 @@ fn do_agent_run(
          只返回一条适合现在的简短建议；若不应打扰，只返回 no_recommendation。"
     );
 
-    match agent_runtime::run_agent(data_dir, &prompt, None, None, agent_runtime::RunMode::Proactive)
-    {
+    match agent_runtime::run_agent(
+        data_dir,
+        &prompt,
+        None,
+        None,
+        agent_runtime::RunMode::Proactive,
+    ) {
         Ok(out) => {
             let text = out.text.trim();
             if text.eq_ignore_ascii_case("no_recommendation") || text.is_empty() {

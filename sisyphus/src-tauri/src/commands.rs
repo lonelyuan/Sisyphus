@@ -8,7 +8,7 @@ use sisyphus_core::ingest::{self, NewEvent};
 use sisyphus_core::rule_engine::{RuleContext, RuleEngine};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 // ── AppState ──────────────────────────────────────────────────────────────────
 
@@ -292,13 +292,153 @@ pub fn delete_detection_rule(state: State<'_, AppState>, id: String) -> Result<(
     sisyphus_core::rules::delete_rule(&conn, &id).map_err(|e| e.to_string())
 }
 
-/// 人生看板卡片（看齐 Notion 的本地投影，供「看板」页展示）。
+/// 旧人生看板卡片 API，保留给已安装版本兼容。
 #[tauri::command]
 pub fn list_lifeindex(
     state: State<'_, AppState>,
 ) -> Result<Vec<sisyphus_core::lifeindex::LifeIndexCard>, String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
     sisyphus_core::lifeindex::list_cards(&conn).map_err(|e| e.to_string())
+}
+
+// ── LifeDB / LifeItem / LifeIndex 四视图 ─────────────────────────────────────
+
+#[tauri::command]
+pub fn list_life_items(
+    state: State<'_, AppState>,
+    include_archived: Option<bool>,
+) -> Result<Vec<sisyphus_core::lifedb::LifeItem>, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    sisyphus_core::lifedb::list_items(&conn, include_archived.unwrap_or(false))
+}
+
+#[tauri::command]
+pub fn upsert_life_item(
+    state: State<'_, AppState>,
+    mut input: sisyphus_core::lifedb::LifeItemInput,
+) -> Result<String, String> {
+    // 前端不能伪装成已同步的 Notion/import 写入；所有 App 修改都必须进入出站队列。
+    input.origin = "app".to_string();
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    sisyphus_core::lifedb::upsert_item(&conn, input)
+}
+
+#[tauri::command]
+pub fn archive_life_item(
+    state: State<'_, AppState>,
+    id: String,
+    expected_revision: Option<i64>,
+) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    sisyphus_core::lifedb::archive_item(&conn, &id, "app", expected_revision)
+}
+
+#[tauri::command]
+pub fn link_life_items(
+    state: State<'_, AppState>,
+    from_item_id: String,
+    to_item_id: String,
+    relation: String,
+    sort_order: Option<i64>,
+) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    sisyphus_core::lifedb::link_items(
+        &conn,
+        &from_item_id,
+        &to_item_id,
+        &relation,
+        sort_order.unwrap_or(0),
+        "app",
+    )
+}
+
+#[tauri::command]
+pub fn list_life_item_edges(
+    state: State<'_, AppState>,
+) -> Result<Vec<sisyphus_core::lifedb::LifeItemEdge>, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    sisyphus_core::lifedb::list_edges(&conn)
+}
+
+#[derive(Debug, Serialize)]
+pub struct LifeIndexSyncOverview {
+    pub configured: bool,
+    pub sync_enabled: bool,
+    pub target_id: String,
+    pub projection: sisyphus_core::lifedb::LifeProjection,
+    pub state: Option<sisyphus_core::lifedb::LifeSyncState>,
+}
+
+#[tauri::command]
+pub fn get_lifeindex_sync_overview(
+    state: State<'_, AppState>,
+) -> Result<LifeIndexSyncOverview, String> {
+    let config = read_notion_config(&state);
+    let target_id = config.page_id.clone();
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    let projection = sisyphus_core::lifedb::render_projection(&conn, &target_id)?;
+    let sync_state = if target_id.is_empty() {
+        None
+    } else {
+        sisyphus_core::lifedb::get_sync_state(&conn, "notion", &target_id)?
+    };
+    Ok(LifeIndexSyncOverview {
+        configured: !config.token.is_empty() && !target_id.is_empty(),
+        sync_enabled: config.sync_enabled,
+        target_id,
+        projection,
+        state: sync_state,
+    })
+}
+
+/// 立即执行一次受限双向同步；成功标准是 Agent 实际调用 complete_lifeindex_sync。
+#[tauri::command]
+pub async fn run_lifeindex_sync(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<agent_runtime::AgentRunOutput, String> {
+    let config = read_notion_config(&state);
+    if !config.sync_enabled || config.token.is_empty() || config.page_id.is_empty() {
+        return Err("请先在设置页配置 Notion token、LifeIndex page ID 并开启同步".to_string());
+    }
+    let started_at = Utc::now().timestamp_millis();
+    let data_dir = state.data_dir.clone();
+    let target_id = config.page_id.clone();
+    let prompt = format!(
+        "立即执行完整 LifeIndex 双向同步。目标 page id：{target_id}。严格按系统步骤三方合并，最终必须成功写回并 complete_lifeindex_sync。"
+    );
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        agent_runtime::run_agent(
+            &data_dir,
+            &prompt,
+            None,
+            None,
+            agent_runtime::RunMode::LifeIndexSync,
+        )
+    })
+    .await
+    .map_err(|e| format!("LifeIndex 同步任务 join 失败: {e}"))?;
+
+    match result {
+        Ok(output) => {
+            let conn = state.conn.lock().map_err(|e| e.to_string())?;
+            let completed = sisyphus_core::lifedb::get_sync_state(&conn, "notion", &target_id)?
+                .and_then(|sync| sync.last_success_at_ms)
+                .is_some_and(|at| at >= started_at);
+            if !completed {
+                let error = "Agent 已结束，但没有完成 Notion 写回确认";
+                sisyphus_core::lifedb::fail_sync(&conn, &target_id, error)?;
+                return Err(error.to_string());
+            }
+            let _ = app.emit("lifeindex-updated", ());
+            Ok(output)
+        }
+        Err(error) => {
+            let conn = state.conn.lock().map_err(|e| e.to_string())?;
+            let _ = sisyphus_core::lifedb::fail_sync(&conn, &target_id, &error);
+            Err(error)
+        }
+    }
 }
 
 /// 当前 Agent runtime、可执行文件与只读能力状态。
@@ -432,13 +572,15 @@ pub fn set_llm_config(
     Ok(())
 }
 
-/// Notion 只读集成：官方 `@notionhq/notion-mcp-server`（NOTION_TOKEN）。
-/// 机制保证只读——建议用户在 Notion 侧创建只给 "Read content" 权限的 integration token，
-/// 这样即使模型误调用写工具，Notion API 侧也会拒绝（不靠提示词自觉，见 notion-integration.md §2.1）。
+/// Notion LifeIndex 集成。token 只交给隔离网关，网关把读写固定到 page_id。
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct NotionConfig {
     #[serde(default)]
     pub token: String,
+    #[serde(default)]
+    pub page_id: String,
+    #[serde(default)]
+    pub sync_enabled: bool,
 }
 
 fn notion_config_path(state: &AppState) -> PathBuf {
@@ -452,22 +594,85 @@ fn read_notion_config(state: &AppState) -> NotionConfig {
         .unwrap_or_default()
 }
 
-/// 读 Notion 配置（**不含 token**，只回 has_token 标记）。
+/// 读 Notion 配置（**不含 token**）。
 #[tauri::command]
 pub fn get_notion_config(state: State<'_, AppState>) -> serde_json::Value {
     let c = read_notion_config(&state);
-    serde_json::json!({ "has_token": !c.token.is_empty() })
+    serde_json::json!({
+        "has_token": !c.token.is_empty(),
+        "page_id": c.page_id,
+        "sync_enabled": c.sync_enabled,
+        "ready": !c.token.is_empty() && !c.page_id.is_empty() && c.sync_enabled,
+    })
 }
 
-/// 写 Notion integration token。传空串清空配置（关闭 Notion 集成）。
+fn canonical_notion_page_id(raw: &str) -> Result<String, String> {
+    let tail = raw
+        .trim()
+        .split('?')
+        .next()
+        .unwrap_or(raw)
+        .rsplit('/')
+        .next()
+        .unwrap_or(raw);
+    let compact: String = tail.chars().filter(|ch| ch.is_ascii_hexdigit()).collect();
+    if compact.len() < 32 {
+        return Err("Page ID 应为 32 位 Notion ID，也可以粘贴完整页面 URL".to_string());
+    }
+    let id = &compact[compact.len() - 32..];
+    Ok(format!(
+        "{}-{}-{}-{}-{}",
+        &id[0..8],
+        &id[8..12],
+        &id[12..16],
+        &id[16..20],
+        &id[20..32]
+    ))
+}
+
+/// 保存 token/page。token 传空时保留旧 token，便于只修改 page 或开关。
 #[tauri::command]
-pub fn set_notion_config(state: State<'_, AppState>, token: String) -> Result<(), String> {
-    let c = NotionConfig {
-        token: token.trim().to_string(),
+pub fn set_notion_config(
+    state: State<'_, AppState>,
+    token: String,
+    page_id: String,
+    sync_enabled: bool,
+) -> Result<(), String> {
+    let mut c = read_notion_config(&state);
+    if !token.trim().is_empty() {
+        c.token = token.trim().to_string();
+    }
+    c.page_id = if page_id.trim().is_empty() {
+        String::new()
+    } else {
+        canonical_notion_page_id(&page_id)?
     };
+    c.sync_enabled = sync_enabled;
+    if sync_enabled && (c.token.is_empty() || c.page_id.is_empty()) {
+        return Err("开启同步前必须配置 Integration Token 和 LifeIndex Page ID".to_string());
+    }
     let json = serde_json::to_string_pretty(&c).map_err(|e| e.to_string())?;
     let path = notion_config_path(&state);
     std::fs::write(&path, json).map_err(|e| format!("写 Notion 配置失败: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("收紧 Notion 配置文件权限失败: {e}"))?;
+    }
+    if c.sync_enabled {
+        let conn = state.conn.lock().map_err(|e| e.to_string())?;
+        sisyphus_core::lifedb::request_sync(&conn)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn clear_notion_config(state: State<'_, AppState>) -> Result<(), String> {
+    let c = NotionConfig::default();
+    let json = serde_json::to_string_pretty(&c).map_err(|e| e.to_string())?;
+    let path = notion_config_path(&state);
+    std::fs::write(&path, json).map_err(|e| format!("清空 Notion 配置失败: {e}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

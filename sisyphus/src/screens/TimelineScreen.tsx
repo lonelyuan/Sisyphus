@@ -242,7 +242,7 @@ export default function TimelineScreen() {
         {detail === "life" && !data.has_long_term_source && (
           <div className="timeline-life-empty">
             <strong>长期方向保持为空</strong>
-            <span>连接 Notion 只读源后，这里才会呈现你亲自维护的长期计划。</span>
+            <span>在 LifeIndex 新建或从 Notion 同步后，这里会呈现你的长期计划。</span>
           </div>
         )}
       </div>

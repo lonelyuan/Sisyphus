@@ -28,7 +28,7 @@ Phase 0 / 1.0 / 1.1 / 1.2 / 1.3 的核心闭环均已落地并在本机跑通（
 
 **超出原 MVP 的额外落地**：感知平面 App 常驻（tray / 关窗不退 / 开机自启）、Codex 风深色 UI（今日 / 记录 / 设置 三页 + 目标·任务 CRUD）、监控名单跨端增删查改、Android 端可编译运行。
 
-**当前主线（2026-07-26 调整）**：Notion 只读上下文源 + 主动推荐闭环。见 [spec/notion-integration.md](spec/notion-integration.md) 与文末「近期推荐下一步」。
+**当前主线（2026-07-27 调整）**：LifeDB 自建结构化人生看板 + Notion 普通文本双向投影。见 [spec/notion-integration.md](spec/notion-integration.md)。
 
 > **kill-criteria 已废弃（2026-07-20 用户决定）**：原以"连续 5 天通知未改变行为→证明无效"当 kill 门。用户判断该门逻辑上无法证伪（永远可归因于"实现不够好"），既不能证伪 idea、反而拖着不敢往下做。故不再当验证门槛，改当**持续打磨的实现质量问题**。"主动提醒能改变行为"作为项目公理，实现形态（宠物/系统通知/遮罩/对话）持续迭代。
 
@@ -56,7 +56,7 @@ Phase 0 / 1.0 / 1.1 / 1.2 / 1.3 的核心闭环均已落地并在本机跑通（
 |---|---|---|
 | 总入口 · InputBox + 意图识别（原 1.2 原声笔记） | 无压记录 + 功能路由 | 任意输入 → `capture` → 意图识别 → 路由到下面三模块 |
 | 1.1 西西弗斯计划（狭义） | 低效习惯与拖延的数字干预 | 行为采集 → 风险识别 → Agent 干预 → 用户反馈 → 近端结果 |
-| LifeIndex · 人生看板 | 用户按原习惯维护、智能体只读理解的个人上下文 | Notion（用户编辑）→ 本地只读镜像；触发时与本地状态联合推理 → 宠物 / 通知（见 [spec/notion-integration.md](spec/notion-integration.md)） |
+| LifeIndex · 人生看板 | 低摩擦记录 + 严格结构化展示 | Notion 自由文本 ↔ Agent 三方语义合并 ↔ SQLite LifeDB → App 四个重叠视图（见 [spec/notion-integration.md](spec/notion-integration.md)） |
 | 1.3 第二大脑 | 和人一同进化的知识工程 | 原始材料/目标 → 学习加工 → 知识库(vault)/知识图谱 → 可读输出/教学 |
 
 ### 统一入口
@@ -306,7 +306,7 @@ MVP 范围：
 
 ## 近期推荐下一步
 
-三条轨道——A 反思平面、B 感知平面（macOS 采集器）、跨端安卓（UsageStats→JNI 后台闭环）——都已跑通。**Core、采集、干预、UI 都不再是瓶颈**。当前主线转向**把用户既有的 Notion 当成只读信息源**，并把定时 / 闲暇触发接成“读取本地 + 刷新 Notion → 主动推荐此刻一件事”。
+三条轨道——A 反思平面、B 感知平面（macOS 采集器）、跨端安卓（UsageStats→JNI 后台闭环）——都已跑通。当前主线是把 **LifeDB 作为人生规划事实层**，让 App 严格展示、Notion 自由编辑，并由受限 Agent 自动双向合并。
 
 ### 当前冲刺：以可用性为目标推进（分批，逐批验证 + 更新本节）
 
@@ -323,16 +323,16 @@ MVP 范围：
 - **批次 E ✅ 已落地（本次）** — 时间轴富化：`query_timeline` 新增 artifact 里程碑图层（目标/任务/提醒/知识卡片/规则创建，点事件）+ note_text 重标为 capture 图层；`TimelineScreen` 按 kind 配色、里程碑画独立小圆标记、详情面板显中文类型标签。所有尺度都展示稀疏里程碑。
 - **批次 F ✅ 已落地（本次）** — 清理死代码（删 `TodayScreen`/`RecordsScreen` + `list_sessions`/`list_recent_sessions`/`SessionRow`）；回写 spec（rule-engine 动态规则、proactive-triggers §4/§7 状态、architecture §9、local-storage 表清单、agent 运行模式）；更新项目记忆（proactive_triggers / pi_agent_inapp）。
 - **批次 G ✅ 已落地（同日追加）** — 排查"智能体没权限"发现两个根因并修复：① `pi-agent-runtime.mjs` 的 `DefaultResourceLoader` 会自动加载项目/全局 `.pi/extensions/pi-permission-system`（给交互终端 UI 写的扩展），在我们的 headless 子进程里对每次工具调用返回"需要审批但无 UI"而拒绝——加 `noExtensions: true` 跳过；② SDK 文档说 `noTools:"builtin"` 会保留 custom tools，但实现里未提供 `tools` 允许名单时不会激活它们——改为显式 `tools: sisyphusTools.map(t=>t.name)`。顺带接入 Notion 只读集成：官方 `@notionhq/notion-mcp-server`，Pi 侧多开一个 MCP client 合并工具面、Codex 侧用 `-c mcp_servers.notion.*` 注入，token 存 `notion_config.json`（0600）+ Settings 新卡片；只读边界由 Notion 侧 integration 权限（仅 "Read content"）机制保证。`AgentScreen` 会话删除失效（`window.confirm` 在 Tauri webview 里常返回 false）一并修复。详见 `docs/spec/notion-integration.md` §8"现状"小节。
+- **批次 H ✅ 已落地（2026-07-27）** — LifeDB / LifeItem / LifeIndex：SQLite 新增统一人生规划对象、关系、外部引用和三方合并快照；旧 tasks/LifeIndex 卡片幂等迁入。MCP/Tauri 增加 LifeItem CRUD、关系、投影和同步完成 API；Pi/Codex 新增 `LifeIndexSync` 白名单模式。Notion 改为固定单页受限网关，只暴露整页 Markdown 读/替换；每日 8:30 入站、本地修改后即时出站、App 手动同步。看板 UI 重构为事项/日常/主线/支线四个重叠视图 + 待整理，并可完整编辑字段。详见 `docs/spec/notion-integration.md`。
 
-### 主线：只读上下文源 + 主动推荐闭环（最高优先）
+### 主线：LifeDB + Notion 文本投影闭环（已完成首版）
 
-心智模型见 [spec/notion-integration.md](spec/notion-integration.md)：**Notion 里的内容只有用户编辑；西西弗斯读取用户更新，并与本地行为状态联合推理。** 不建 Inbox / NOW，不回写完成状态。
+心智模型见 [spec/notion-integration.md](spec/notion-integration.md)：**LifeDB 是事实源，App 是严格视图，Notion 是自由文本交互层，Agent 是语义编译器。**
 
-1. **通用 `ContextSource` + 只读 `NotionContextSource`**：只授权用户选择的页面 / 数据源；主动智能体只拿 list / read / query，工具面没有 create / update / append / delete。
-2. **通用本地镜像**：用 `source_connections` / `source_snapshots` 保存来源、外部 ID、更新时间、观测时间、hash 和 payload。镜像可重建，不新增 `notion_actions` 任务真相。
-3. **主动推荐 v0**：定时器或闲暇规则 enqueue `agent_run(mode=proactive_recommendation)` → 并行读 `query_context` 与刷新后的 Notion 上下文 → 最多生成 1 条带 source refs 的推荐或 `no_recommendation`。
-4. **统一投递**：宿主做新鲜度、隐私、冷却与去重校验；宠物和系统通知消费同一个 recommendation id；反馈与近端结果只落本地。
-5. **验收只读闭环**：用只读凭据跑通“用户改 Notion → 下次触发读到新版本 → 联合本地状态推理 → 宠物 / 通知”，并验证 Notion 无任何写请求。
+1. **已完成：LifeDB 数据模型**：五种 kind + track + horizon + 状态/时间/循环 + 邻接关系。
+2. **已完成：受限双向同步**：三方快照、乐观 revision、固定单页网关、失败审计和并发保护。
+3. **已完成：App 四视图**：事项/日常按形态，主线/支线按意义，允许同一项重叠展示。
+4. **下一步：同步实测与恢复 UI**：用真实 LifeIndex 页面覆盖首次导入、并发编辑、删除冲突、Notion 限流和子页面保护；为 conflict 提供显式人工合并入口。
 
 ### 让闭环真正有用的小补丁（按性价比排序，都不需新架构）
 

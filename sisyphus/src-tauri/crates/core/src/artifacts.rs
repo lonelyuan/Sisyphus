@@ -170,8 +170,9 @@ pub fn insert_intent_candidates(
     let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
     let mut ids = Vec::with_capacity(candidates.len());
     for (kind, proposed, confidence) in candidates {
-        let id = insert_intent_candidate(&tx, capture_event_id, kind, proposed, *confidence, source)
-            .map_err(|e| e.to_string())?;
+        let id =
+            insert_intent_candidate(&tx, capture_event_id, kind, proposed, *confidence, source)
+                .map_err(|e| e.to_string())?;
         ids.push(id);
     }
     tx.commit().map_err(|e| e.to_string())?;
@@ -337,11 +338,23 @@ pub fn create_task(
     intent_id: Option<&str>,
 ) -> rusqlite::Result<String> {
     let id = Uuid::new_v4().to_string();
+    let now = now_ms();
     conn.execute(
         "INSERT INTO tasks (id, created_at, source_event_id, intent_id, title, status, due_ms, priority, note)
          VALUES (?1,?2,?3,?4,?5,'todo',?6,?7,?8)",
-        params![id, now_ms(), source_event_id, intent_id, title, due_ms, priority, note],
+        params![id, now, source_event_id, intent_id, title, due_ms, priority, note],
     )?;
+    // LifeDB 是 LifeIndex 的统一事实层；旧 task API 继续可用，但与 action 同 ID 双写。
+    conn.execute(
+        "INSERT OR REPLACE INTO life_items
+           (id,kind,title,body,track,horizon,status,due_at_ms,source_event_id,intent_id,
+            sync_status,revision,created_at,updated_at)
+         VALUES (?1,'action',?2,COALESCE(?3,''),'undecided',
+                 CASE WHEN ?4 IS NULL THEN 'unscheduled' ELSE 'next' END,
+                 'inbox',?4,?5,?6,'local_dirty',1,?7,?7)",
+        params![id, title, note, due_ms, source_event_id, intent_id, now],
+    )?;
+    let _ = crate::lifedb::request_sync(conn);
     Ok(id)
 }
 
@@ -429,6 +442,19 @@ pub fn update_task_status(conn: &Connection, id: &str, status: &str) -> rusqlite
         "UPDATE tasks SET status = ?1 WHERE id = ?2",
         params![status, id],
     )?;
+    let life_status = match status {
+        "todo" => "inbox",
+        "doing" => "active",
+        "done" => "done",
+        _ => "archived",
+    };
+    conn.execute(
+        "UPDATE life_items SET status=?2,sync_status='local_dirty',revision=revision+1,
+                updated_at=?3,archived_at=CASE WHEN ?2='archived' THEN ?3 ELSE NULL END
+         WHERE id=?1",
+        params![id, life_status, now_ms()],
+    )?;
+    let _ = crate::lifedb::request_sync(conn);
     Ok(())
 }
 
@@ -467,6 +493,13 @@ pub fn list_tasks(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Task>> 
 
 pub fn delete_task(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+    let now = now_ms();
+    conn.execute(
+        "UPDATE life_items SET status='archived',sync_status='local_dirty',revision=revision+1,
+                updated_at=?2,archived_at=?2 WHERE id=?1",
+        params![id, now],
+    )?;
+    let _ = crate::lifedb::request_sync(conn);
     Ok(())
 }
 

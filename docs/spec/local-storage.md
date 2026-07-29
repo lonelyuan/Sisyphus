@@ -13,11 +13,12 @@
 | 类别 | 表 | 性质 | 统一吗 |
 |---|---|---|---|
 | **Event log** | `raw_events`（+ 派生层同表） | append-only，不可变 | 统一（信封 + payload） |
-| **Artifact store** | `daily_goals`、`interventions`、`tasks`/`notes`/`reminders`/`intent_candidates`、`scheduled_actions`、`detection_rules`、`lifeindex_cards`、`knowledge_notes`、`monitored_apps` | 可变，有 status | 不统一，分表 |
-| **External source cache** | （规划）`source_connections`、`source_snapshots` | 外部内容的只读、可重建镜像 | 统一上下文信封，不是 artifact |
+| **Artifact store** | `daily_goals`、`interventions`、`tasks`/`notes`/`reminders`/`intent_candidates`、`scheduled_actions`、`detection_rules`、`knowledge_notes`、`monitored_apps` | 可变，有 status | 不统一，分表 |
+| **LifeDB** | `life_items`、`life_item_edges`、`life_item_external_refs`、`life_sync_state`、`life_sync_runs` | 人生规划域的结构化事实、关系和同步审计 | 统一对象 + 邻接表 |
+| **兼容投影** | `lifeindex_cards` | 旧版本看板兼容，只迁入 LifeDB，不再作为新 UI 真相源 | 可移除 |
 | 传输 | `outbox` | 上传队列 | — |
 
-**铁律**：不造多态大表 `artifacts` 用 type 兜住所有对象；每种有状态对象各自建表。**第二个采集源落地前，不新增 artifact 表**（见 [architecture.md](architecture.md) §2.3）。
+**铁律**：不造能兜住所有业务的多态大表 `artifacts`。LifeItem 只统一人生规划域的 idea/goal/project/action/routine；note/reminder/intervention 等仍有自己的表。
 
 ---
 
@@ -83,14 +84,19 @@ ORDER BY start_time DESC LIMIT 1;
 | `user_response` | 用户点击的按钮：`start_task` \| `take_rest` \| `continue` \| `abandon_today` |
 | `outcome` | 干预后结果（延迟回填） |
 
-### `source_connections` / `source_snapshots` — 外部信息源缓存（规划）
+### LifeDB — `life_items` / `life_item_edges`
 
-Notion 等用户既有工具通过只读 `ContextSource` 接入。不要为每个工具各造一套任务表；用通用连接元数据和带来源的快照信封缓存：
+`life_items` 的 `kind` 表示对象从模糊到落地的形态，`track` 表示主线/支线，`horizon` 表示时间尺度；三者正交。`revision + sync_status` 支持乐观并发和 Notion 双向同步。
 
-- `source_connections`：源类型、只读模式、用户授权范围、启用状态、最后同步结果；**不存 token**。
-- `source_snapshots`：`connection_id + external_id` 幂等键、源更新时间、观测时间、内容 hash 与原始 / 归一化 payload。
+`life_item_edges` 是邻接表，保存 contains/supports/depends_on/blocks/derived_from/related。当前规模用 SQLite 索引与 recursive CTE；没有引入图数据库的查询或运维理由。
 
-这两张表不是第三类真相，也不是多态 Artifact store：它们是可以随时删除并从外部源重建的读取投影。用户内容仍以原工具为准；主动智能体只能读取镜像，确定性同步器负责刷新。完整设计见 [notion-integration.md](notion-integration.md)。
+### Notion 同步审计 — `life_item_external_refs` / `life_sync_state`
+
+- `life_item_external_refs`：外部稳定 ID、URL、更新时间、hash、最后发布 revision；不保存 token。
+- `life_sync_state`：唯一页面的上次成功 Markdown 快照、摘要、成功/尝试时间与错误。
+- `life_sync_runs`：每次成功同步的 Notion 写前全文与最终投影；用于恢复首次导入或错误语义合并。
+
+Notion token 和 page ID 由 app 数据目录的 `notion_config.json` 保存（Unix `0600`）；token 不进 SQLite、不返回前端。完整语义见 [notion-integration.md](notion-integration.md)。
 
 ---
 

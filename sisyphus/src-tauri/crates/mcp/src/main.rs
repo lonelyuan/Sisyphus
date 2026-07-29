@@ -6,6 +6,7 @@
 //!
 //! ⚠️ stdout 是 MCP 协议通道，任何日志/调试输出必须走 stderr。
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -205,6 +206,109 @@ pub struct LifeIndexIdReq {
     pub id: String,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct LifeExternalRefReq {
+    /// 外部适配器：当前通常为 notion
+    pub provider: String,
+    /// 外部 page / block 的稳定 id
+    pub external_id: String,
+    #[serde(default)]
+    pub external_url: Option<String>,
+    #[serde(default)]
+    pub external_updated_at_ms: Option<i64>,
+    #[serde(default)]
+    pub content_hash: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpsertLifeItemReq {
+    /// 已有 LifeItem id；新建时留空。同步 Notion 时优先传 external_ref 做幂等匹配。
+    #[serde(default)]
+    pub id: Option<String>,
+    /// 更新已有项时建议回传 list_life_items 返回的 revision；不一致会拒绝覆盖并要求重新合并。
+    #[serde(default)]
+    pub expected_revision: Option<i64>,
+    /// idea | goal | project | action | routine
+    pub kind: String,
+    pub title: String,
+    #[serde(default)]
+    pub body: String,
+    /// main | side | neutral | undecided
+    #[serde(default)]
+    pub track: Option<String>,
+    /// now | next | later | someday | unscheduled
+    #[serde(default)]
+    pub horizon: Option<String>,
+    /// inbox | active | waiting | done | archived
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub start_at_ms: Option<i64>,
+    #[serde(default)]
+    pub due_at_ms: Option<i64>,
+    #[serde(default)]
+    pub review_at_ms: Option<i64>,
+    /// RFC 5545 RRULE 或人类可读周期；未知则留空，不猜。
+    #[serde(default)]
+    pub recurrence: Option<String>,
+    /// app | agent | notion | import。同步 Notion 文本进入本地时必须传 notion，避免回环。
+    #[serde(default)]
+    pub origin: Option<String>,
+    #[serde(default)]
+    pub external_ref: Option<LifeExternalRefReq>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListLifeItemsReq {
+    #[serde(default)]
+    pub include_archived: Option<bool>,
+    /// true 时只返回尚未投影到 Notion 的本地变更。
+    #[serde(default)]
+    pub dirty_only: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ArchiveLifeItemReq {
+    pub id: String,
+    #[serde(default)]
+    pub expected_revision: Option<i64>,
+    /// app | agent | notion
+    #[serde(default)]
+    pub origin: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct LinkLifeItemsReq {
+    pub from_item_id: String,
+    pub to_item_id: String,
+    /// contains | supports | depends_on | blocks | derived_from | related
+    pub relation: String,
+    #[serde(default)]
+    pub sort_order: Option<i64>,
+    #[serde(default)]
+    pub origin: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct LifeProjectionReq {
+    /// Notion 投影目标 page id；用于取三方合并基线。
+    pub target_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CompleteLifeSyncReq {
+    pub target_id: String,
+    /// 本轮 read_lifeindex_page 得到的写回前完整文本，用于本地恢复审计。
+    pub remote_before_text: String,
+    /// 成功写回 Notion 的最终页面文本。
+    pub snapshot_text: String,
+    /// 本轮从 Notion 吸收/向 Notion 发布的简短摘要。
+    #[serde(default)]
+    pub summary: String,
+    /// render_lifeindex_projection 返回的 projected_revisions，必须原样回传。
+    pub projected_revisions: BTreeMap<String, i64>,
+}
+
 // ── Server ────────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -216,7 +320,7 @@ pub struct SisyphusServer {
     device_id: String,
     /// 完全只读：所有写工具禁用（主动推荐模式）。
     read_only: bool,
-    /// 仅看板可写：除 lifeindex 工具外的写工具禁用（lifeindex_refresh 模式）。
+    /// 仅 LifeDB 可写：除 LifeItem/同步工具外的写工具禁用（LifeIndexSync 模式）。
     lifeindex_only: bool,
 }
 
@@ -550,7 +654,157 @@ impl SisyphusServer {
         Ok("deleted".to_string())
     }
 
-    // ── 人生看板 LifeIndex（看齐 Notion 的本地投影）─────────────────────────────
+    // ── LifeDB / LifeItem / LifeIndex ──────────────────────────────────────────
+
+    #[tool(
+        description = "列出 LifeDB 中高度结构化的 LifeItem。四个看板只是过滤视图：action=事项，routine=日常，track=main/side=主线/支线。同步前先读取，按稳定 id 更新，禁止凭标题生成重复项。"
+    )]
+    fn list_life_items(
+        &self,
+        Parameters(ListLifeItemsReq {
+            include_archived,
+            dirty_only,
+        }): Parameters<ListLifeItemsReq>,
+    ) -> Result<String, String> {
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let v = if dirty_only.unwrap_or(false) {
+            sisyphus_core::lifedb::list_dirty_items(&conn)?
+        } else {
+            sisyphus_core::lifedb::list_items(&conn, include_archived.unwrap_or(false))?
+        };
+        serde_json::to_string_pretty(&v).map_err(|e| format!("序列化失败: {e}"))
+    }
+
+    #[tool(
+        description = "创建或更新一个 LifeItem。Notion→本地同步时 origin 必须为 notion，并优先用已有 id；App/对话产生的改动用 app/agent，会自动标记待出站同步。未知时间、轨道和优先级保持默认，不要猜。"
+    )]
+    fn upsert_life_item(
+        &self,
+        Parameters(req): Parameters<UpsertLifeItemReq>,
+    ) -> Result<String, String> {
+        self.ensure_lifeindex_writable()?;
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let external_ref = req
+            .external_ref
+            .map(|ext| sisyphus_core::lifedb::ExternalRefInput {
+                provider: ext.provider,
+                external_id: ext.external_id,
+                external_url: ext.external_url,
+                external_updated_at_ms: ext.external_updated_at_ms,
+                content_hash: ext.content_hash,
+            });
+        let id = sisyphus_core::lifedb::upsert_item(
+            &conn,
+            sisyphus_core::lifedb::LifeItemInput {
+                id: req.id,
+                expected_revision: req.expected_revision,
+                kind: req.kind,
+                title: req.title,
+                body: req.body,
+                track: req.track.unwrap_or_else(|| "undecided".to_string()),
+                horizon: req.horizon.unwrap_or_else(|| "unscheduled".to_string()),
+                status: req.status.unwrap_or_else(|| "inbox".to_string()),
+                start_at_ms: req.start_at_ms,
+                due_at_ms: req.due_at_ms,
+                review_at_ms: req.review_at_ms,
+                recurrence: req.recurrence,
+                source_event_id: None,
+                intent_id: None,
+                origin: req.origin.unwrap_or_else(|| "agent".to_string()),
+                external_ref,
+            },
+        )?;
+        Ok(format!("life item: {id}"))
+    }
+
+    #[tool(
+        description = "归档一个 LifeItem。仅当用户明确删除/归档，或 Notion 同步确认对应文本被删除时调用。"
+    )]
+    fn archive_life_item(
+        &self,
+        Parameters(ArchiveLifeItemReq {
+            id,
+            expected_revision,
+            origin,
+        }): Parameters<ArchiveLifeItemReq>,
+    ) -> Result<String, String> {
+        self.ensure_lifeindex_writable()?;
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        sisyphus_core::lifedb::archive_item(
+            &conn,
+            &id,
+            origin.as_deref().unwrap_or("agent"),
+            expected_revision,
+        )?;
+        Ok("archived".to_string())
+    }
+
+    #[tool(
+        description = "建立 LifeItem 关系。contains 表示目标/项目包含子项目、事项或日常；其它关系用于支持、依赖、阻塞、派生和弱关联。"
+    )]
+    fn link_life_items(
+        &self,
+        Parameters(req): Parameters<LinkLifeItemsReq>,
+    ) -> Result<String, String> {
+        self.ensure_lifeindex_writable()?;
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        sisyphus_core::lifedb::link_items(
+            &conn,
+            &req.from_item_id,
+            &req.to_item_id,
+            &req.relation,
+            req.sort_order.unwrap_or(0),
+            req.origin.as_deref().unwrap_or("agent"),
+        )?;
+        Ok("linked".to_string())
+    }
+
+    #[tool(description = "列出 LifeItem 的全部结构关系，供 Agent 理解目标→项目→行动/日常层级。")]
+    fn list_life_item_edges(&self) -> Result<String, String> {
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let v = sisyphus_core::lifedb::list_edges(&conn)?;
+        serde_json::to_string_pretty(&v).map_err(|e| format!("序列化失败: {e}"))
+    }
+
+    #[tool(
+        description = "生成 Notion 普通页面应展示的最终 LifeIndex Markdown，同时返回上次成功同步快照。同步 Agent 用 remote 当前文本 + last_snapshot_text + 本地 LifeItem 做三方语义合并。"
+    )]
+    fn render_lifeindex_projection(
+        &self,
+        Parameters(LifeProjectionReq { target_id }): Parameters<LifeProjectionReq>,
+    ) -> Result<String, String> {
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let v = sisyphus_core::lifedb::render_projection(&conn, &target_id)?;
+        serde_json::to_string_pretty(&v).map_err(|e| format!("序列化失败: {e}"))
+    }
+
+    #[tool(
+        description = "仅在 Notion 页面成功写回后调用：保存三方合并基线，并把本地脏 LifeItem 标为 clean。写回失败时绝对不要调用。"
+    )]
+    fn complete_lifeindex_sync(
+        &self,
+        Parameters(CompleteLifeSyncReq {
+            target_id,
+            remote_before_text,
+            snapshot_text,
+            summary,
+            projected_revisions,
+        }): Parameters<CompleteLifeSyncReq>,
+    ) -> Result<String, String> {
+        self.ensure_lifeindex_writable()?;
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        sisyphus_core::lifedb::complete_sync(
+            &conn,
+            &target_id,
+            &remote_before_text,
+            &snapshot_text,
+            &summary,
+            &projected_revisions,
+        )?;
+        Ok("lifeindex sync complete".to_string())
+    }
+
+    // 旧卡片工具暂时保留，供已安装 skill 兼容；新实现统一使用上面的 LifeDB 工具。
 
     #[tool(
         description = "列出人生看板全部卡片（按分区排序），返回 JSON。刷新看板前先看它，避免重复。"
@@ -619,6 +873,7 @@ impl ServerHandler for SisyphusServer {
                  第二大脑：ingest_document 收素材 → 你阅读加工 → write_knowledge_note 写概念卡片到 Obsidian 知识库（[[wikilink]] 关联）；search_knowledge/list_knowledge 检索；delete_note 删卡（合并碎卡后清冗余）。\
                  西西弗斯计划（拖延干预）：add_monitored_app 把某娱乐 app 纳入监控 + set_goal 设目标，用户超时刷它时端侧自动弹干预；list_monitored_apps 查名单。\
                  想“盯住某类行为/新场景”时用 create_detection_rule 把用户口述落成检测规则（声明式 trigger + response），list/set_enabled/delete_detection_rule 管理。\
+                 LifeIndex：LifeDB 是事实源；list/upsert_life_item 管理 idea/goal/project/action/routine，link_life_items 建关系；Notion 双向同步必须走受限 LifeIndexSync，三方合并后成功写回才 complete_lifeindex_sync。\
                  语气：关心不评判、只提最小下一步、引用真实数据。"
                     .to_string(),
             ),

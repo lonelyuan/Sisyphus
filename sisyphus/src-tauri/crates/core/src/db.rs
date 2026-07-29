@@ -433,9 +433,8 @@ CREATE TABLE IF NOT EXISTS detection_rules (
 );
 CREATE INDEX IF NOT EXISTS idx_detection_rules_enabled ON detection_rules (enabled);
 
--- ── 人生看板 LifeIndex（notion-integration.md）───────────────────────────────
--- 看板内容看齐 Notion：智能体只读参考 Notion + 本地上下文后写这张表。可重建投影，
--- 非真相源；Notion 由用户编辑、智能体绝不回写。按 (section,title) 幂等 upsert。
+-- ── 旧版人生看板兼容表 ───────────────────────────────────────────────────────
+-- 新实现以 life_items 为事实源；本表只保留已安装版本兼容并在下方幂等迁入 LifeDB。
 CREATE TABLE IF NOT EXISTS lifeindex_cards (
     id                TEXT PRIMARY KEY,
     section           TEXT NOT NULL,              -- 分区，如 今日焦点 / 长期目标 / 研究问题
@@ -451,4 +450,119 @@ CREATE TABLE IF NOT EXISTS lifeindex_cards (
     UNIQUE(section, title)
 );
 CREATE INDEX IF NOT EXISTS idx_lifeindex_status ON lifeindex_cards (status, section);
+
+-- ── LifeDB：LifeIndex 的结构化事实来源 ───────────────────────────────────────
+-- LifeItem 是人生规划领域内的统一对象，不是兜住所有业务的多态 artifact：
+-- note / reminder / intervention 等仍保留独立表。Notion 只通过受控同步器交换表面文本。
+CREATE TABLE IF NOT EXISTS life_items (
+    id              TEXT PRIMARY KEY,
+    kind            TEXT NOT NULL CHECK (kind IN ('idea','goal','project','action','routine')),
+    title           TEXT NOT NULL,
+    body            TEXT NOT NULL DEFAULT '',
+    track           TEXT NOT NULL DEFAULT 'undecided'
+                    CHECK (track IN ('main','side','neutral','undecided')),
+    horizon         TEXT NOT NULL DEFAULT 'unscheduled'
+                    CHECK (horizon IN ('now','next','later','someday','unscheduled')),
+    status          TEXT NOT NULL DEFAULT 'inbox'
+                    CHECK (status IN ('inbox','active','waiting','done','archived')),
+    start_at_ms     INTEGER,
+    due_at_ms       INTEGER,
+    review_at_ms    INTEGER,
+    recurrence      TEXT,
+    source_event_id TEXT,
+    intent_id       TEXT,
+    sync_status     TEXT NOT NULL DEFAULT 'local_dirty'
+                    CHECK (sync_status IN ('clean','local_dirty','notion_dirty','conflict')),
+    revision        INTEGER NOT NULL DEFAULT 1,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL,
+    archived_at     INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_life_items_view
+    ON life_items (status, kind, track, horizon, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_life_items_sync
+    ON life_items (sync_status, updated_at DESC);
+
+-- 邻接表就是 LifeDB 的图结构；SQLite recursive CTE 足够查询目标→项目→行动/日常。
+CREATE TABLE IF NOT EXISTS life_item_edges (
+    from_item_id TEXT NOT NULL,
+    to_item_id   TEXT NOT NULL,
+    relation     TEXT NOT NULL
+                 CHECK (relation IN ('contains','supports','depends_on','blocks','derived_from','related')),
+    sort_order   INTEGER NOT NULL DEFAULT 0,
+    created_at   INTEGER NOT NULL,
+    PRIMARY KEY (from_item_id, to_item_id, relation),
+    FOREIGN KEY (from_item_id) REFERENCES life_items(id) ON DELETE CASCADE,
+    FOREIGN KEY (to_item_id) REFERENCES life_items(id) ON DELETE CASCADE,
+    CHECK (from_item_id != to_item_id)
+);
+CREATE INDEX IF NOT EXISTS idx_life_edges_to ON life_item_edges (to_item_id, relation);
+
+-- 外部引用与本体解耦；同一个 LifeItem 可来自 capture、Notion 页面或其它适配器。
+CREATE TABLE IF NOT EXISTS life_item_external_refs (
+    item_id                TEXT NOT NULL,
+    provider               TEXT NOT NULL,
+    external_id            TEXT NOT NULL,
+    external_url           TEXT,
+    external_updated_at_ms INTEGER,
+    content_hash           TEXT,
+    last_pushed_revision   INTEGER,
+    observed_at_ms         INTEGER NOT NULL,
+    PRIMARY KEY (provider, external_id),
+    FOREIGN KEY (item_id) REFERENCES life_items(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_life_refs_item ON life_item_external_refs (item_id, provider);
+
+-- 三方合并基线：上次成功投影文本 + 同步状态。Agent 负责理解差异，Core 负责审计与门禁。
+CREATE TABLE IF NOT EXISTS life_sync_state (
+    provider           TEXT NOT NULL,
+    target_id          TEXT NOT NULL,
+    last_snapshot_text TEXT NOT NULL DEFAULT '',
+    last_summary       TEXT NOT NULL DEFAULT '',
+    last_success_at_ms INTEGER,
+    last_attempt_at_ms INTEGER,
+    last_error         TEXT,
+    PRIMARY KEY (provider, target_id)
+);
+
+-- 每次成功写回前后的完整文本审计。首次同步也保留用户原始 Notion 页面，便于恢复。
+CREATE TABLE IF NOT EXISTS life_sync_runs (
+    id                   TEXT PRIMARY KEY,
+    provider             TEXT NOT NULL,
+    target_id            TEXT NOT NULL,
+    remote_before_text   TEXT NOT NULL,
+    final_snapshot_text  TEXT NOT NULL,
+    summary              TEXT NOT NULL DEFAULT '',
+    completed_at_ms      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_life_sync_runs_target
+    ON life_sync_runs (provider, target_id, completed_at_ms DESC);
+
+-- 兼容迁移：现有任务进入 action；旧 LifeIndex 卡片只迁一次，保留来源文本。
+INSERT OR IGNORE INTO life_items
+    (id,kind,title,body,track,horizon,status,due_at_ms,source_event_id,intent_id,
+     sync_status,revision,created_at,updated_at,archived_at)
+SELECT id,'action',title,COALESCE(note,''),'undecided',
+       CASE WHEN due_ms IS NULL THEN 'unscheduled' ELSE 'next' END,
+       CASE status WHEN 'todo' THEN 'inbox' WHEN 'doing' THEN 'active'
+                   WHEN 'done' THEN 'done' ELSE 'archived' END,
+       due_ms,source_event_id,intent_id,'local_dirty',1,created_at,created_at,
+       CASE WHEN status='dropped' THEN created_at ELSE NULL END
+FROM tasks;
+
+INSERT OR IGNORE INTO life_items
+    (id,kind,title,body,track,horizon,status,sync_status,revision,created_at,updated_at,archived_at)
+SELECT id,
+       CASE WHEN section LIKE '%日常%' THEN 'routine'
+            WHEN section LIKE '%目标%' THEN 'goal'
+            WHEN section LIKE '%事项%' OR section LIKE '%焦点%' THEN 'action'
+            ELSE 'idea' END,
+       title,body,
+       CASE WHEN section LIKE '%主线%' THEN 'main'
+            WHEN section LIKE '%支线%' THEN 'side' ELSE 'undecided' END,
+       'unscheduled',
+       CASE status WHEN 'archived' THEN 'archived' ELSE 'active' END,
+       'local_dirty',1,created_at,updated_at,
+       CASE WHEN status='archived' THEN updated_at ELSE NULL END
+FROM lifeindex_cards;
 "#;

@@ -2,7 +2,7 @@
 
 本文件是西西弗斯**主动能力**的权威文档：系统如何在没有用户当下输入时，自己决定“何时做点什么”，读取本地与外部上下文，并把结果投递到宠物 / 系统通知。
 
-上位文档：[architecture.md](architecture.md)（两平面 + 双存储 + `ingest_event` 契约）。本设计横跨两个平面：**“何时触发”是感知平面的确定性活**（不调 LLM），**“结合什么信息、建议什么”可以是反思平面的 agent**。相关：[rule-engine.md](rule-engine.md)（行为触发来源）、[notion-integration.md](notion-integration.md)（Notion 只读信息源）。
+上位文档：[architecture.md](architecture.md)（两平面 + 双存储 + `ingest_event` 契约）。本设计横跨两个平面：**“何时触发”是感知平面的确定性活**（不调 LLM），**“结合什么信息、建议什么”可以是反思平面的 agent**。相关：[rule-engine.md](rule-engine.md)（行为触发来源）、[notion-integration.md](notion-integration.md)（LifeDB / Notion 投影）。
 
 ---
 
@@ -95,7 +95,7 @@ enum DueTime { At(i64), After(i64) }   // 绝对 epoch ms / 相对延迟 ms
 
 **"响应规划器"** 把 policy 翻译成 `enqueue_action`：`Immediate`→`due_at=now`；`Deferred{After(Δ)}`→`due_at=now+Δ`；`Debounce`→带 `dedup_key` 入队。**MVP 规划器可以极简（一律 Immediate→notify），但这个 seam 必须先立住**——日后加"检测到 doom-scrolling 但现在别烦他、45 分钟后若仍在刷再提醒""夜间 policy=Suppress""下班闲暇时段才推支线"都只是新增 policy 分支，不动执行器、不动队列。
 
-> 个人看板链路也使用同一框架：引擎检测到闲暇后 enqueue `agent_run(mode=proactive_recommendation)`；宿主刷新本地状态与 Notion 只读上下文，agent 只生成一条推荐，再由宿主投递到宠物 / 通知。Notion 不是执行器，也没有回写动作。
+> 个人看板链路也使用同一框架：LifeDB 修改或每日时刻 enqueue `agent_run(mode=lifeindex_sync)`，受限 Agent 双向合并唯一 Notion 页面；闲暇推荐仍用 `proactive_recommendation`，只读 LifeDB 并生成一条建议。
 
 ---
 
@@ -109,7 +109,7 @@ enum DueTime { At(i64), After(i64) }   // 绝对 epoch ms / 相对延迟 ms
 | `pet_message` | emit `pet-message` 事件给宠物窗展示（`Pet.tsx` 监听）；与 `agent-recommendation` 共用展示逻辑 | 桌面 | ✅ 已接（去重待做） |
 | `agent_run` | worker 线程 `std::process::Command` 拉起 Pi/Codex；按 payload mode（proactive/lifeindex）读本地 MCP 与只读外部源，返回结构化结果再投递 | **仅桌面**（手机无 node/codex） | ✅ 已接 |
 
-**agent_run 的往返**：app 到点 → 并行读取本地 `query_context`、刷新 Notion 等只读信息源 → 拉 codex 推理 → codex 返回一条结构化 recommendation 或 `no_recommendation` → app 做冷却 / 去重 / 隐私校验 → 宠物与通知消费同一结果。**“何时触发”确定性在 app，“推荐什么”在 agent，“是否最终打扰”由宿主策略兜底**。
+**推荐 agent_run 的往返**：app 到点 → 读取本地 `query_context` 与 LifeDB → 拉 Agent 推理 → 返回一条 recommendation 或 `no_recommendation` → app 做冷却 / 去重 / 隐私校验 → 宠物与通知消费同一结果。**“何时触发”确定性在 app，“推荐什么”在 agent，“是否最终打扰”由宿主策略兜底**。
 
 ---
 
@@ -130,7 +130,7 @@ enum DueTime { At(i64), After(i64) }   // 绝对 epoch ms / 相对延迟 ms
 
 ```
 19:00 触发（scheduled_actions, recurrence=daily@19:00, kind=agent_run）
-  → 刷新 Notion 只读源，并读取 query_context(目标/行为/近期反馈)
+  → 读取 query_context(目标/行为/近期反馈) 与已同步 LifeDB
   → 拉 codex(mode=proactive_recommendation, max=1)
   → 返回“做什么 + 为什么 + source refs”，或 no_recommendation
   → 宿主去重 / 冷却
@@ -156,8 +156,8 @@ Notion 只参与输入，不参与输出。用户在 Notion 中的后续修改�
 1. `core::scheduler`：`scheduled_actions` 表 + `enqueue_action` / `due_actions` / `mark_fired` / `mark_done` / 周期 `reschedule` + 单测。
 2. app 常驻 ticker：`due-check` 派发 `notify` / `pet_message`（emit 到宠物窗，`Pet.tsx` 监听）/ `agent_run`（放 worker 线程执行，不阻塞主循环；缺 runtime 优雅降级）。
 3. `ResponsePolicy` seam 已立（`core::rule_engine::ResponsePolicy`：Immediate/Deferred/Debounce/Suppress）：规则命中经它落地——Immediate 即时派发、Deferred/Debounce 入队。
-4. 静态周期 job：每日 9:00 `proactive_recommendation`、每日 8:30 `lifeindex_refresh`（读 Notion 只读 → 更新本地看板）。旧“知识库自省”job 已停用（与只读边界冲突）。
-5. `agent_run` 模式区分：`proactive_recommendation`（只读）/ `lifeindex_refresh`（仅看板可写）；主对话为交互可写。
+4. 静态周期 job：每日 9:00 `proactive_recommendation`、每日 8:30 `lifeindex_sync`；LifeDB 本地修改另入队即时同步。旧 `lifeindex_refresh` pending job 启动时取消。
+5. `agent_run` 模式区分：`Proactive`（严格只读）/ `LifeIndexSync`（只写 LifeDB + 固定 Notion 页）/ `Interactive`（用户确认后可写 Core，Notion 只读）。
 
 **后续（按需，勿提前造）：**
 - 响应规划器接更多规则策略（真实 `Deferred`/`Debounce`/`Suppress` 防打扰场景批量落地）。

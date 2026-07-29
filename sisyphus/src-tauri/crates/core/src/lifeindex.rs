@@ -2,7 +2,7 @@
 //!
 //! 看板内容看齐用户的 Notion：每次由智能体**只读参考 Notion + 本地上下文**，再把结构化卡片
 //! 写进这张本地表。它是**可重建的只读投影**（architecture.md §2.4）——Notion 仍是唯一真相源，
-//! 智能体绝不回写 Notion。纯 rusqlite，安卓可编。
+//! 新实现已迁移到 `lifedb`；本模块只保留旧卡片 API 兼容。纯 rusqlite，安卓可编。
 
 use rusqlite::{params, Connection};
 use serde::Serialize;

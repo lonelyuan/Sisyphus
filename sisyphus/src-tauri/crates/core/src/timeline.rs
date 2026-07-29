@@ -56,7 +56,7 @@ pub struct TimelineResponse {
     pub events: Vec<TimelineEvent>,
     pub days: Vec<DaySummary>,
     pub truncated: bool,
-    /// 长期计划应来自用户只读信息源；未连接时前端展示真实空态。
+    /// 长期计划来自 LifeDB；没有 LifeItem 时前端展示真实空态。
     pub has_long_term_source: bool,
 }
 

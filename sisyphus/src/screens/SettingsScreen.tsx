@@ -54,6 +54,13 @@ interface DetectionRule {
   created_by: string;
 }
 
+interface NotionConfigView {
+  has_token: boolean;
+  page_id: string;
+  sync_enabled: boolean;
+  ready: boolean;
+}
+
 export default function SettingsScreen() {
   const [platform, setPlatform] = useState("");
   const [autostart, setAutostart] = useState<boolean | null>(null);
@@ -76,7 +83,12 @@ export default function SettingsScreen() {
   const [apiKey, setApiKey] = useState("");
   const [llmSaving, setLlmSaving] = useState(false);
   const [llmTest, setLlmTest] = useState("");
-  const [notion, setNotion] = useState<{ has_token: boolean }>({ has_token: false });
+  const [notion, setNotion] = useState<NotionConfigView>({
+    has_token: false,
+    page_id: "",
+    sync_enabled: false,
+    ready: false,
+  });
   const [notionToken, setNotionToken] = useState("");
   const [notionSaving, setNotionSaving] = useState(false);
   const [notionMsg, setNotionMsg] = useState("");
@@ -127,17 +139,21 @@ export default function SettingsScreen() {
   }
 
   function loadNotionConfig() {
-    invoke<{ has_token: boolean }>("get_notion_config").then(setNotion).catch(() => {});
+    invoke<NotionConfigView>("get_notion_config").then(setNotion).catch(() => {});
   }
 
   async function saveNotionToken() {
     setNotionSaving(true);
     setNotionMsg("");
     try {
-      await invoke("set_notion_config", { token: notionToken });
+      await invoke("set_notion_config", {
+        token: notionToken,
+        pageId: notion.page_id,
+        syncEnabled: notion.sync_enabled,
+      });
       setNotionToken("");
       loadNotionConfig();
-      setNotionMsg("已保存");
+      setNotionMsg(notion.sync_enabled ? "已保存，将自动开始同步" : "配置已保存");
     } catch (e) {
       setErr("保存 Notion 配置失败: " + String(e));
     } finally {
@@ -149,7 +165,7 @@ export default function SettingsScreen() {
     setNotionSaving(true);
     setNotionMsg("");
     try {
-      await invoke("set_notion_config", { token: "" });
+      await invoke("clear_notion_config");
       loadNotionConfig();
       setNotionMsg("已断开");
     } catch (e) {
@@ -306,7 +322,7 @@ export default function SettingsScreen() {
             <CardLabel>Agent Runtime</CardLabel>
           </div>
           <span className="flex items-center gap-1 rounded-full bg-success/10 px-2 py-1 text-[10px] text-success">
-            <ShieldCheck size={11} /> 只读
+            <ShieldCheck size={11} /> 权限分层
           </span>
         </div>
         <div className="grid grid-cols-3 gap-1 rounded-lg bg-muted p-1">
@@ -340,7 +356,7 @@ export default function SettingsScreen() {
           ))}
         </div>
         <p className="text-[11px] leading-relaxed text-muted-foreground">
-          当前实际使用 <b>{runtimeStatus?.resolved || "检测中"}</b>。Pi 由项目内 JS SDK 驱动，不依赖全局 pi CLI；主对话、宠物和定时任务共用 Sisyphus skill 与只读工具面。
+          当前实际使用 <b>{runtimeStatus?.resolved || "检测中"}</b>。Pi 由项目内 JS SDK 驱动；主动建议只读，交互会话可写 Core，LifeIndex 同步只能写 LifeDB 与指定 Notion 页面。
         </p>
       </Card>
 
@@ -436,20 +452,19 @@ export default function SettingsScreen() {
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <Database size={14} strokeWidth={1.75} className="text-muted-foreground" />
-            <CardLabel>Notion 只读信息源</CardLabel>
+            <CardLabel>Notion · LifeIndex 文本投影</CardLabel>
           </div>
           <span
             className={cn(
               "rounded-full px-2 py-1 text-[10px]",
-              notion.has_token ? "bg-success/10 text-success" : "bg-warning/10 text-warning",
+              notion.ready ? "bg-success/10 text-success" : "bg-warning/10 text-warning",
             )}
           >
-            {notion.has_token ? "已配置" : "尚未连接"}
+            {notion.ready ? "双向同步已开启" : notion.has_token ? "待完成配置" : "尚未连接"}
           </span>
         </div>
         <p className="text-xs leading-relaxed text-muted-foreground">
-          由官方 <code>@notionhq/notion-mcp-server</code> 接入，Pi / Codex 两个基座共用。只读边界由 Notion
-          侧保证：在{" "}
+          SQLite LifeDB 是事实源，Notion 只是一张可自由编辑的普通文本页面。Agent 会理解页面修改并合并到本地，App 修改则投影回同一页。受限网关把写入固定到下面这一个 Page ID，模型不能改写其它页面。在{" "}
           <a
             href="https://www.notion.so/my-integrations"
             target="_blank"
@@ -458,8 +473,7 @@ export default function SettingsScreen() {
           >
             notion.so/my-integrations
           </a>{" "}
-          新建 integration 时只勾选 <b>“Read content”</b>，再把要给智能体看的页面 Share 给它——即使模型误调用写工具，Notion
-          API 侧也会拒绝，不靠提示词自觉。
+          新建 integration 时勾选 <b>“Read content” 与 “Update content”</b>，并且只把 LifeIndex 页面连接给它。
         </p>
         <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
           Integration Token
@@ -470,6 +484,27 @@ export default function SettingsScreen() {
             placeholder={notion.has_token ? "已保存，留空保持不变" : "ntn_…"}
             autoComplete="off"
             spellCheck={false}
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
+          LifeIndex Page ID 或页面 URL
+          <Input
+            value={notion.page_id}
+            onChange={(e) => setNotion((value) => ({ ...value, page_id: e.target.value, ready: false }))}
+            placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </label>
+        <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2 text-xs text-foreground">
+          <span>
+            开启定时双向同步
+            <span className="mt-0.5 block text-[10px] text-muted-foreground">每天 8:30 拉取；本地修改后尽快推送</span>
+          </span>
+          <Switch
+            checked={notion.sync_enabled}
+            onCheckedChange={(checked) => setNotion((value) => ({ ...value, sync_enabled: checked, ready: false }))}
+            aria-label="开启 LifeIndex 双向同步"
           />
         </label>
         <div className="flex flex-wrap items-center gap-2">

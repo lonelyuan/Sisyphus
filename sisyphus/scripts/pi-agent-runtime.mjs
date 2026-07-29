@@ -55,7 +55,7 @@ async function readStdin() {
 
 /**
  * 连接一个 MCP stdio server，把它的工具逐个包成 Pi customTool。同一份逻辑给 sisyphus-mcp
- * 和 Notion 官方 notion-mcp-server 共用，两个基座（Pi/Codex）由此拿到同一套工具契约
+ * 和 LifeIndex Notion 网关共用，两个基座（Pi/Codex）由此拿到同一套工具契约
  * （architecture.md §4）。连接失败时返回空工具集（降级，不让整次运行崩掉）。
  */
 async function connectMcpClient(label, command, args, env) {
@@ -107,19 +107,77 @@ async function loadSisyphusTools() {
     const value = process.env[key];
     if (value !== undefined) env[key] = value;
   }
-  return connectMcpClient("sisyphus", mcpBin, [], env);
+  const loaded = await connectMcpClient("sisyphus", mcpBin, [], env);
+  const readOnly = process.env.SISYPHUS_READ_ONLY?.trim() === "1";
+  const lifeIndexOnly = process.env.SISYPHUS_LIFEINDEX_ONLY?.trim() === "1";
+  const allowed = lifeIndexOnly
+    ? new Set([
+        "list_life_items",
+        "upsert_life_item",
+        "archive_life_item",
+        "link_life_items",
+        "list_life_item_edges",
+        "render_lifeindex_projection",
+        "complete_lifeindex_sync",
+      ])
+    : readOnly
+      ? new Set([
+          "query_context",
+          "today_actions",
+          "list_captures",
+          "list_monitored_apps",
+          "list_detection_rules",
+          "list_life_items",
+          "list_life_item_edges",
+        ])
+      : new Set([
+          "capture",
+          "query_context",
+          "today_actions",
+          "set_goal",
+          "list_captures",
+          "propose_intents",
+          "accept_intent",
+          "ignore_intent",
+          "ingest_document",
+          "write_knowledge_note",
+          "save_source",
+          "search_knowledge",
+          "list_knowledge",
+          "delete_note",
+          "list_monitored_apps",
+          "add_monitored_app",
+          "remove_monitored_app",
+          "list_detection_rules",
+          "create_detection_rule",
+          "set_detection_rule_enabled",
+          "delete_detection_rule",
+          "list_life_items",
+          "upsert_life_item",
+          "archive_life_item",
+          "link_life_items",
+          "list_life_item_edges",
+          "render_lifeindex_projection",
+        ]);
+  loaded.tools = loaded.tools.filter((tool) => allowed.has(tool.name));
+  return loaded;
 }
 
 /**
- * 连官方 Notion MCP server（`npx -y @notionhq/notion-mcp-server`），只在配置了
- * SISYPHUS_NOTION_TOKEN 时接入。只读边界靠 Notion 侧的 integration 权限机制保证
- * （建议 token 只给 "Read content" 权限），不靠这里的代码或提示词自觉。
+ * 连 LifeIndex 专用网关。网关内部再连接官方 Notion MCP，并把 page_id 固定在后端；
+ * 普通模式只列读取工具，LifeIndexSync 模式才列整页替换工具。
  */
 async function loadNotionTools() {
   const token = process.env.SISYPHUS_NOTION_TOKEN?.trim();
-  if (!token) return { tools: [], client: null };
-  const env = { ...process.env, NOTION_TOKEN: token };
-  return connectMcpClient("notion", "npx", ["-y", "@notionhq/notion-mcp-server"], env);
+  const pageId = process.env.SISYPHUS_NOTION_PAGE_ID?.trim();
+  const gateway = process.env.SISYPHUS_NOTION_GATEWAY_SCRIPT?.trim();
+  if (!token || !pageId || !gateway) return { tools: [], client: null };
+  const env = {
+    ...process.env,
+    SISYPHUS_NOTION_TOKEN: token,
+    SISYPHUS_NOTION_PAGE_ID: pageId,
+  };
+  return connectMcpClient("notion-lifeindex", process.execPath, [gateway], env);
 }
 
 function finalAssistantText(messages) {
@@ -151,6 +209,7 @@ const apiKey = required("SISYPHUS_PI_API_KEY");
 const baseUrl = process.env.SISYPHUS_PI_BASE_URL?.trim() ?? "";
 // 主动/只读模式由宿主经 SISYPHUS_READ_ONLY 注入（"1"=只读）。决定系统提示与 MCP 写门禁。
 const readOnly = process.env.SISYPHUS_READ_ONLY?.trim() === "1";
+const lifeIndexOnly = process.env.SISYPHUS_LIFEINDEX_ONLY?.trim() === "1";
 
 await mkdir(agentDir, { recursive: true });
 
@@ -204,14 +263,18 @@ const resourceLoader = new DefaultResourceLoader({
   // "requires approval, but no interactive UI is available" 而拒绝执行——我们自己的只读/可写
   // 门禁已经在 MCP server 侧（SISYPHUS_READ_ONLY/LIFEINDEX_ONLY）做了，不需要它。
   noExtensions: true,
-  systemPrompt: readOnly
+  systemPrompt: lifeIndexOnly
+    ? `你是西西弗斯 LifeIndexSync Agent。SQLite LifeDB 是事实源，Notion 是用户可编辑的普通文本输入/投影。
+只允许调用 LifeItem/关系/投影/同步完成工具，以及固定单页网关的 read_lifeindex_page 和 replace_lifeindex_page；不得修改其它本地状态或 Notion 页面。
+严格执行三方语义合并：本地当前状态 + Notion 当前文本 + 上次成功快照。保留所有原始事项；未知内容进入 idea/inbox；不猜时间与主次；写回成功后才 complete_lifeindex_sync，并把写回前全文传入 remote_before_text 留作恢复。优先遵循 sisyphus skill。`
+    : readOnly
     ? `你是西西弗斯个人助手。当前为主动/只读模式：可以读取用户授权的本地状态和外部信息源，但严格禁止创建、修改或删除本地文件、数据库、Notion 文档、任务、目标或知识库。优先遵循 sisyphus skill，给用户的建议最多聚焦一件当下值得做的事。`
     : `你是西西弗斯个人助手（交互模式）。
 
 【工具授权】你已经被完全授权直接使用所有 sisyphus 本地工具，无需任何额外授权、审批、弹窗或确认入口——它们随时可用，直接调用即可。绝对不要声称"需要授权""没有审批界面""无法读取/写入"之类；那是错误的，你有权限。
-【读取】query_context / list_lifeindex / list_detection_rules / list_monitored_apps / list_captures / search_knowledge 等只读工具：需要时**直接调用**，不要征求许可，也不要让用户手动贴数据。
-【写入】set_goal / add_monitored_app / create_detection_rule / propose_intents+accept_intent / write_knowledge_note / upsert_lifeindex_card 等：先用一句话向用户复述你要做什么并等其认可，认可后**立即调用工具真正落库**（不要只说"已设置"却不调用）。
-【看板刷新】"刷新看板"= 先 list_lifeindex + query_context 读现状（直接调用），再据此 upsert_lifeindex_card 更新；外部 Notion 只读、绝不回写。
+【读取】query_context / list_life_items / list_detection_rules / list_monitored_apps / list_captures 等只读工具：需要时**直接调用**，不要征求许可，也不要让用户手动贴数据。
+【写入】set_goal / add_monitored_app / create_detection_rule / propose_intents+accept_intent / upsert_life_item 等：先用一句话向用户复述你要做什么并等其认可，认可后**立即调用工具真正落库**（不要只说"已设置"却不调用）。
+【看板同步】普通交互只读 Notion；本地 LifeItem 修改会自动排队，由隔离的 LifeIndexSync Agent 双向同步到配置好的唯一页面。
 语气关心不评判、具体、只提最小下一步。优先遵循 sisyphus skill。`,
 });
 await resourceLoader.reload({ resolveProjectTrust: async () => true });

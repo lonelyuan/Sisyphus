@@ -1,7 +1,8 @@
-//! 可替换的只读 Agent runtime。
+//! 可替换的 Agent runtime。
 //!
 //! 主对话、桌面宠物和主动调度都走这一层，避免各自维护一套 Pi/Codex 能力。
-//! Agent 可以读取 Sisyphus / 外部信息源并推理，但不能修改用户内容或本地文件。
+//! 普通主动任务严格只读；交互任务可写 Core；LifeIndexSync 只能写 LifeDB 与配置好的
+//! 单个 Notion 页面，Notion token 和 page_id 由受限 MCP 网关隔离。
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -22,9 +23,14 @@ struct ActiveRuns {
 }
 
 static ACTIVE_RUNS: OnceLock<Mutex<ActiveRuns>> = OnceLock::new();
+static LIFEINDEX_SYNC_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn active_runs() -> &'static Mutex<ActiveRuns> {
     ACTIVE_RUNS.get_or_init(|| Mutex::new(ActiveRuns::default()))
+}
+
+fn lifeindex_sync_lock() -> &'static Mutex<()> {
+    LIFEINDEX_SYNC_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 struct ActiveRunGuard(Option<String>);
@@ -62,7 +68,7 @@ impl Drop for ActiveRunGuard {
 }
 
 const READ_ONLY_PREAMBLE: &str = r#"你是西西弗斯个人助手。请遵循 sisyphus skill，并保持严格只读：
-- 可以读取西西弗斯本地状态、已授权的 Notion 只读信息源和网页；
+- 可以读取西西弗斯本地状态、已配置的 Notion LifeIndex 页面和网页；
 - 不得创建、编辑、删除 Notion 内容，不维护 Inbox/NOW/“下一项”；
 - 不得修改本地文件、数据库、任务、目标或知识库；
 - 给用户的建议最多聚焦一件当下值得做的事，依据不足时明确说不知道。
@@ -71,18 +77,20 @@ const READ_ONLY_PREAMBLE: &str = r#"你是西西弗斯个人助手。请遵循 s
 const INTERACTIVE_PREAMBLE: &str = r#"你是西西弗斯个人助手。请遵循 sisyphus skill。当前是用户主动发起的交互会话：
 - 你可以调用西西弗斯本地工具去真正落地用户意图：capture 记录、set_goal 设目标、
   add_monitored_app 纳入监控、create_detection_rule 建检测规则、propose_intents/accept_intent
-  落任务/提醒、write_knowledge_note 写知识库、upsert_lifeindex_card 更新看板等；
+  落任务/提醒、upsert_life_item 更新 LifeDB 等；
 - 落库前用一句话向用户复述确认（认可 / 修改 / 忽略），只提最小下一步，不生成任务海；
-- 外部信息源（如 Notion）始终只读：只读取参考，绝不创建 / 编辑 / 删除用户的 Notion 内容；
+- 普通交互中的 Notion 工具只读；App/LifeDB 的出站修改由隔离的 LifeIndexSync 任务完成；
 - 语气关心不评判、具体（引用真实时长 / 目标 / 数据）、不羞辱不说教。
 "#;
 
-const LIFEINDEX_PREAMBLE: &str = r#"你是西西弗斯的看板维护助手（LifeIndex 刷新任务）。目标：让本地人生看板看齐用户的 Notion。
-- 只读参考：读取用户已授权的 Notion（长期目标 / 短期 Todo / 研究问题 / 个人发展等）与本地 query_context；
-- 唯一允许的写操作：用 upsert_lifeindex_card 把提炼出的卡片写进本地看板（section+title 幂等），
-  source_ref 填 Notion 溯源；必要时 delete_lifeindex_card 清理已失效的卡片；
-- 严禁修改 Notion，严禁调用其它本地写工具（set_goal / 任务 / 规则 / 知识库都不要动）；
-- 卡片正文简洁：每张 3 行内，聚焦"是什么 + 当前状态"。完成后简述本次更新了哪些分区。
+const LIFEINDEX_PREAMBLE: &str = r#"你是西西弗斯的 LifeIndexSync Agent。SQLite LifeDB 是结构化事实源，Notion 是用户可自由编辑的普通文本输入/投影层。
+- 你的写权限严格限于 LifeDB 的 LifeItem/关系工具，以及网关固定的唯一 Notion LifeIndex 页面；不得修改目标、提醒、规则、知识库、文件或其它 Notion 页面；
+- 先 list_life_items(include_archived=true)、list_life_item_edges、render_lifeindex_projection(target_id)，再 read_lifeindex_page；
+- 用 remote 当前文本、last_snapshot_text、当前 LifeItem 做三方语义合并。首次同步时逐条吸收页面中所有事项、日常、目标、项目与想法；无法确定的原文也作为 idea/inbox 保留，绝不静默丢弃；
+- Notion→本地用 upsert_life_item(origin="notion")。更新已有项必须带 id 与 expected_revision；按 <!-- lifeitem:uuid -->、语义和层级识别同一项，禁止按标题盲目复制；只有明确删除且本地未并发修改时才归档；
+- 冲突时优先保留双方信息并选择可逆结果，不猜时间、主次或优先级；可用 link_life_items 表达目标→项目→行动/日常；
+- 合并后再次 render_lifeindex_projection，把其 markdown 原样交给 replace_lifeindex_page。成功后才调用 complete_lifeindex_sync，并把写回前 Notion 原文作为 remote_before_text、逐项 revision 原样回传；写回失败绝不能 complete；
+- 最终只简述吸收/发布/冲突数量，不输出 token，不要求用户手工搬运数据。
 "#;
 
 /// Agent 运行模式。决定只读门禁与系统前言。
@@ -92,8 +100,8 @@ pub enum RunMode {
     Interactive,
     /// 定时 / 规则触发的主动任务：严格只读，只产出一条建议。
     Proactive,
-    /// 看板刷新：只读参考 Notion + 本地上下文，仅允许写本地看板卡片（不动其它本地状态、不写 Notion）。
-    LifeIndex,
+    /// 双向同步：仅允许写 LifeDB 与配置好的单个 Notion LifeIndex 页面。
+    LifeIndexSync,
 }
 
 impl RunMode {
@@ -102,14 +110,69 @@ impl RunMode {
     }
 
     fn lifeindex_only(self) -> bool {
-        matches!(self, RunMode::LifeIndex)
+        matches!(self, RunMode::LifeIndexSync)
     }
 
     fn preamble(self) -> &'static str {
         match self {
             RunMode::Interactive => INTERACTIVE_PREAMBLE,
             RunMode::Proactive => READ_ONLY_PREAMBLE,
-            RunMode::LifeIndex => LIFEINDEX_PREAMBLE,
+            RunMode::LifeIndexSync => LIFEINDEX_PREAMBLE,
+        }
+    }
+
+    fn sisyphus_tools(self) -> &'static [&'static str] {
+        const READ_TOOLS: &[&str] = &[
+            "query_context",
+            "today_actions",
+            "list_captures",
+            "list_monitored_apps",
+            "list_detection_rules",
+            "list_life_items",
+            "list_life_item_edges",
+        ];
+        const LIFEINDEX_TOOLS: &[&str] = &[
+            "list_life_items",
+            "upsert_life_item",
+            "archive_life_item",
+            "link_life_items",
+            "list_life_item_edges",
+            "render_lifeindex_projection",
+            "complete_lifeindex_sync",
+        ];
+        const INTERACTIVE_TOOLS: &[&str] = &[
+            "capture",
+            "query_context",
+            "today_actions",
+            "set_goal",
+            "list_captures",
+            "propose_intents",
+            "accept_intent",
+            "ignore_intent",
+            "ingest_document",
+            "write_knowledge_note",
+            "save_source",
+            "search_knowledge",
+            "list_knowledge",
+            "delete_note",
+            "list_monitored_apps",
+            "add_monitored_app",
+            "remove_monitored_app",
+            "list_detection_rules",
+            "create_detection_rule",
+            "set_detection_rule_enabled",
+            "delete_detection_rule",
+            "list_life_items",
+            "upsert_life_item",
+            "archive_life_item",
+            "link_life_items",
+            "list_life_item_edges",
+            "render_lifeindex_projection",
+        ];
+        match self {
+            RunMode::Interactive => INTERACTIVE_TOOLS,
+            RunMode::Proactive => READ_TOOLS,
+            RunMode::LifeIndexSync => LIFEINDEX_TOOLS,
         }
     }
 }
@@ -238,6 +301,24 @@ pub fn run_agent(
     run_id: Option<&str>,
     mode: RunMode,
 ) -> Result<AgentRunOutput, String> {
+    let _lifeindex_guard = if mode.lifeindex_only() {
+        Some(
+            lifeindex_sync_lock()
+                .lock()
+                .map_err(|_| "LifeIndex 同步锁异常".to_string())?,
+        )
+    } else {
+        None
+    };
+    if mode.lifeindex_only() {
+        notion_sync_target(data_dir).ok_or_else(|| {
+            "LifeIndex 同步未启用：请在设置页配置 Notion token、LifeIndex page ID 并开启同步"
+                .to_string()
+        })?;
+        if !notion_gateway_script().is_file() {
+            return Err("LifeIndex Notion 网关脚本不存在".to_string());
+        }
+    }
     let run_guard = ActiveRunGuard::new(run_id)?;
     if is_cancelled(run_guard.id()) {
         return Err("Agent 请求已停止".to_string());
@@ -314,7 +395,7 @@ fn run_with_runtime(
             let mut command = Command::new(bin);
             command.current_dir(project_root()).arg("exec");
             // Codex 用户配置里可能还有能写外部系统的 MCP。App runtime 只保留 sisyphus
-            // 本地 server，其余逐个禁用；外部内容源（如 Notion）永远只读。
+            // 本地 server，其余逐个禁用。Notion 只经固定单页的受限网关接入。
             for server in codex_config_mcp_servers() {
                 if server != "sisyphus" {
                     command.arg("-c").arg(disable_mcp_override(&server));
@@ -328,33 +409,74 @@ fn run_with_runtime(
                 "--disable",
                 "plugin_sharing",
             ]);
-            // Notion 只读集成：官方 notion-mcp-server（npx），只在配置了 token 时接入。
-            // 读工具，两种模式都放行（只读边界由 Notion 侧的 integration 权限机制保证，
-            // 见 notion-integration.md §2.1：建议 token 只给 "Read content" 权限）。
-            if let Some(token) = read_notion_token(data_dir) {
+            let local_mcp = mcp_bin();
+            let enabled_tools = mode
+                .sisyphus_tools()
+                .iter()
+                .map(|name| format!("\"{name}\""))
+                .collect::<Vec<_>>()
+                .join(",");
+            command
+                .arg("-c")
+                .arg("mcp_servers.sisyphus.enabled=true")
+                .arg("-c")
+                .arg(format!(
+                    "mcp_servers.sisyphus.command=\"{}\"",
+                    escape_toml_string(&local_mcp.to_string_lossy())
+                ))
+                .arg("-c")
+                .arg("mcp_servers.sisyphus.args=[]")
+                .arg("-c")
+                .arg(format!(
+                    "mcp_servers.sisyphus.enabled_tools=[{enabled_tools}]"
+                ))
+                .arg("-c")
+                .arg(format!(
+                    "mcp_servers.sisyphus.env.SISYPHUS_DB=\"{}\"",
+                    escape_toml_string(&db_file(data_dir).to_string_lossy())
+                ))
+                .arg("-c")
+                .arg(format!(
+                    "mcp_servers.sisyphus.env.SISYPHUS_VAULT=\"{}\"",
+                    escape_toml_string(&vault_dir(data_dir).to_string_lossy())
+                ))
+                .arg("-c")
+                .arg(format!(
+                    "mcp_servers.sisyphus.env.SISYPHUS_READ_ONLY=\"{}\"",
+                    if mode.read_only() { "1" } else { "0" }
+                ))
+                .arg("-c")
+                .arg(format!(
+                    "mcp_servers.sisyphus.env.SISYPHUS_LIFEINDEX_ONLY=\"{}\"",
+                    if mode.lifeindex_only() { "1" } else { "0" }
+                ));
+            if let Some(notion) = read_notion_connection(data_dir) {
+                let node =
+                    node_path.ok_or_else(|| "Notion LifeIndex 网关需要 Node.js".to_string())?;
+                let gateway = notion_gateway_script();
                 command
                     .arg("-c")
-                    .arg("mcp_servers.notion.command=\"npx\"")
-                    .arg("-c")
-                    .arg("mcp_servers.notion.args=[\"-y\",\"@notionhq/notion-mcp-server\"]")
+                    .arg("mcp_servers.notion.enabled=true")
                     .arg("-c")
                     .arg(format!(
-                        "mcp_servers.notion.env.NOTION_TOKEN=\"{}\"",
-                        escape_toml_string(&token)
-                    ));
+                        "mcp_servers.notion.command=\"{}\"",
+                        escape_toml_string(&node.to_string_lossy())
+                    ))
+                    .arg("-c")
+                    .arg(format!(
+                        "mcp_servers.notion.args=[\"{}\"]",
+                        escape_toml_string(&gateway.to_string_lossy())
+                    ))
+                    .env("SISYPHUS_NOTION_TOKEN", notion.token)
+                    .env("SISYPHUS_NOTION_PAGE_ID", notion.page_id)
+                    .env(
+                        "SISYPHUS_NOTION_ALLOW_WRITE",
+                        if mode.lifeindex_only() { "1" } else { "0" },
+                    );
             }
             // 主动模式：给 sisyphus MCP 注入 SISYPHUS_READ_ONLY 硬门禁；
             // 看板刷新模式：注入 SISYPHUS_LIFEINDEX_ONLY（仅看板可写）；
             // 交互模式：不注入，用户可经确认后驱动本地写工具（set_goal/建规则/写知识等）。
-            if mode.read_only() {
-                command
-                    .arg("-c")
-                    .arg("mcp_servers.sisyphus.env.SISYPHUS_READ_ONLY=\"1\"");
-            } else if mode.lifeindex_only() {
-                command
-                    .arg("-c")
-                    .arg("mcp_servers.sisyphus.env.SISYPHUS_LIFEINDEX_ONLY=\"1\"");
-            }
             command
                 .args([
                     "-c",
@@ -477,16 +599,30 @@ const NOTION_CONFIG_FILE: &str = "notion_config.json";
 struct NotionConfigFile {
     #[serde(default)]
     token: String,
+    #[serde(default)]
+    page_id: String,
+    #[serde(default)]
+    sync_enabled: bool,
 }
 
-/// 读用户在设置页保存的 Notion integration token（非空才 Some）。
-fn read_notion_token(data_dir: &Path) -> Option<String> {
+fn read_notion_config(data_dir: &Path) -> NotionConfigFile {
     let cfg: NotionConfigFile = std::fs::read_to_string(data_dir.join(NOTION_CONFIG_FILE))
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_default();
-    let token = cfg.token.trim().to_string();
-    (!token.is_empty()).then_some(token)
+    cfg
+}
+
+fn read_notion_connection(data_dir: &Path) -> Option<NotionConfigFile> {
+    let mut cfg = read_notion_config(data_dir);
+    cfg.token = cfg.token.trim().to_string();
+    cfg.page_id = cfg.page_id.trim().to_string();
+    (cfg.sync_enabled && !cfg.token.is_empty() && !cfg.page_id.is_empty()).then_some(cfg)
+}
+
+/// 已启用的 Notion LifeIndex page id。token 不离开 runtime / 网关边界。
+pub fn notion_sync_target(data_dir: &Path) -> Option<String> {
+    read_notion_connection(data_dir).map(|cfg| cfg.page_id)
 }
 
 /// 转义 codex `-c key="value"` 里的双引号 TOML 字符串值。
@@ -544,7 +680,7 @@ fn run_pi_sdk(
         .env("SISYPHUS_PI_MODEL", config.model.trim())
         .env("SISYPHUS_PI_API_KEY", config.api_key())
         // 批次 B：Pi 运行脚本 spawn 同一个 sisyphus-mcp，拿到与 Codex 相同的工具面。
-        // 让它开同一库/同一 vault，并按模式决定只读门禁（外部内容源永远只读）。
+        // 让它开同一库/同一 vault，并按模式决定只读门禁。
         .env("SISYPHUS_MCP_BIN", mcp_bin())
         .env("SISYPHUS_DB", db_file(data_dir))
         .env("SISYPHUS_VAULT", vault_dir(data_dir))
@@ -556,11 +692,26 @@ fn run_pi_sdk(
             "SISYPHUS_LIFEINDEX_ONLY",
             if mode.lifeindex_only() { "1" } else { "0" },
         )
-        // Notion 只读集成：runner 侧会另起一个 npx notion-mcp-server 客户端合并进工具面。
+        // Notion token 只交给固定单页网关；模型工具参数中没有 token/page_id。
         .env(
             "SISYPHUS_NOTION_TOKEN",
-            read_notion_token(data_dir).unwrap_or_default(),
+            read_notion_connection(data_dir)
+                .as_ref()
+                .map(|cfg| cfg.token.clone())
+                .unwrap_or_default(),
         )
+        .env(
+            "SISYPHUS_NOTION_PAGE_ID",
+            read_notion_connection(data_dir)
+                .as_ref()
+                .map(|cfg| cfg.page_id.clone())
+                .unwrap_or_default(),
+        )
+        .env(
+            "SISYPHUS_NOTION_ALLOW_WRITE",
+            if mode.lifeindex_only() { "1" } else { "0" },
+        )
+        .env("SISYPHUS_NOTION_GATEWAY_SCRIPT", notion_gateway_script())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -691,6 +842,18 @@ fn pi_sdk_runner() -> PathBuf {
         .join("pi-agent-runtime.mjs")
 }
 
+fn notion_gateway_script() -> PathBuf {
+    if let Ok(path) = std::env::var("SISYPHUS_NOTION_GATEWAY_SCRIPT") {
+        if !path.trim().is_empty() {
+            return PathBuf::from(path);
+        }
+    }
+    project_root()
+        .join("sisyphus")
+        .join("scripts")
+        .join("notion-lifeindex-gateway.mjs")
+}
+
 /// 读取用户级 / 项目级 config.toml 以及项目 `.mcp.json` 中配置的 MCP 名称。
 /// 外部系统连接器都逐个禁用，只留下 Sisyphus 自己的只读 server。
 fn codex_config_mcp_servers() -> Vec<String> {
@@ -753,7 +916,9 @@ fn disable_mcp_override(server: &str) -> String {
 /// 仅设置尚未被外部显式覆盖的变量（dev 里 `SISYPHUS_*` 若已设则尊重）。
 pub fn init_paths(resource_dir: Option<&Path>, mcp_bin_path: Option<&Path>) {
     fn set_if_unset(key: &str, value: &Path) {
-        let has = std::env::var(key).map(|v| !v.trim().is_empty()).unwrap_or(false);
+        let has = std::env::var(key)
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
         if !has {
             std::env::set_var(key, value);
         }
@@ -771,6 +936,10 @@ pub fn init_paths(resource_dir: Option<&Path>, mcp_bin_path: Option<&Path>) {
         let runner = rd.join("scripts").join("pi-agent-runtime.mjs");
         if runner.is_file() {
             set_if_unset("SISYPHUS_PI_SDK_RUNNER", &runner);
+        }
+        let notion_gateway = rd.join("scripts").join("notion-lifeindex-gateway.mjs");
+        if notion_gateway.is_file() {
+            set_if_unset("SISYPHUS_NOTION_GATEWAY_SCRIPT", &notion_gateway);
         }
     }
     #[cfg(debug_assertions)]

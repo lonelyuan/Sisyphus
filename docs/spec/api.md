@@ -18,7 +18,7 @@
 
 ## 1. MCP 工具面（反思平面 · Agent 用）
 
-实现：`sisyphus/src-tauri/crates/mcp/src/main.rs`（`rmcp` stdio）。由 Codex/Claude 作子进程拉起，打开与 App 同一个 `sisyphus.db`。共 **17 个工具**。
+实现：`sisyphus/src-tauri/crates/mcp/src/main.rs`（`rmcp` stdio）。由 Pi/Codex 作子进程拉起，打开与 App 同一个 `sisyphus.db`。
 
 ### 1.1 原声笔记闭环（capture → 意图 → artifact）
 
@@ -57,11 +57,25 @@
 | `add_monitored_app` | `id`, `category` | `monitoring: {id} -> {cat}` | 写 | 纳入监控（跨端即时生效） |
 | `remove_monitored_app` | `id` | `removed` | 写 | 移出监控 |
 
+### 1.5 LifeDB / LifeIndexSync
+
+| 工具 | 参数 | 返回 | 读/写 | 作用 |
+|---|---|---|---|---|
+| `list_life_items` | `include_archived?`, `dirty_only?` | JSON `[LifeItem]` | 读 | 读取结构化人生规划对象及 revision |
+| `upsert_life_item` | `id?`, `expected_revision?`, kind/title/body/track/horizon/status/time/recurrence, `origin?`, `external_ref?` | `life item: {id}` | 写 LifeDB | 新建/更新；同步更新用 expected revision 防并发覆盖 |
+| `archive_life_item` | `id`, `origin?` | `archived` | 写 LifeDB | 可恢复归档 |
+| `link_life_items` | from/to/relation/sort_order/origin | `linked` | 写 LifeDB | 建立目标→项目→行动/日常等关系 |
+| `list_life_item_edges` | — | JSON `[LifeItemEdge]` | 读 | 读取关系图 |
+| `render_lifeindex_projection` | `target_id` | `LifeProjection` | 读 | 生成四视图 Markdown、上次快照、逐项 revisions |
+| `complete_lifeindex_sync` | target/`remote_before_text`/snapshot/summary/`projected_revisions` | completed | 写同步审计 | 仅 Notion 成功写回后调用；保存写前备份并按逐项 revision 清 dirty |
+
+`SISYPHUS_LIFEINDEX_ONLY=1` 时只开放本节工具；Notion 读写走独立固定单页网关，不在此 MCP 内保存 token。
+
 ---
 
 ## 2. Tauri 命令面（App IPC · 前端 `invoke()`）
 
-实现：`sisyphus/src-tauri/src/commands.rs` + `src/lib.rs`；注册于 `lib.rs` 的 `generate_handler![]`。共 **26 个命令**。平台列：🖥️ 桌面 / 📱 安卓 / 双 = 两端。
+实现：`sisyphus/src-tauri/src/commands.rs` + `src/lib.rs`；注册于 `lib.rs` 的 `generate_handler![]`。平台列：🖥️ 桌面 / 📱 安卓 / 双 = 两端。
 
 ### 2.1 写入与规则（感知平面）
 
@@ -105,7 +119,21 @@
 | `remove_monitored_app` | `id` | `()` | 双 | 删监控 |
 | `ping` | — | `String`("pong") | 双 | 连通性自检 |
 
-### 2.5 安卓专属（前台采集 · 特殊权限）
+### 2.5 LifeDB、同步与配置
+
+| 命令 | 参数 | 返回 | 平台 | 作用 |
+|---|---|---|---|---|
+| `list_life_items` | `include_archived?` | `[LifeItem]` | 双 | 四视图同一数据源 |
+| `upsert_life_item` | `input: LifeItemInput` | id | 双 | App 写入，后端强制 `origin=app` 并排队同步 |
+| `archive_life_item` | `id` | `()` | 双 | 归档并排队同步 |
+| `link_life_items` / `list_life_item_edges` | 关系参数 / — | `()` / edges | 双 | 编辑/读取 LifeItem 关系 |
+| `get_lifeindex_sync_overview` | — | 配置状态 + projection + sync state | 双 | 显示 dirty、成功时间与错误 |
+| `run_lifeindex_sync` | — | `AgentRunOutput` | 🖥️ | 立即运行受限三方语义合并 |
+| `get_notion_config` | — | 无 token 的配置状态 | 双 | token 只返回 `has_token` |
+| `set_notion_config` | token/page_id/sync_enabled | `()` | 双 | 保存固定页面配置并请求同步 |
+| `clear_notion_config` | — | `()` | 双 | 清空连接配置，不删除 LifeDB |
+
+### 2.6 安卓专属（前台采集 · 特殊权限）
 
 | 命令 | 参数 | 返回 | 平台 | 作用 |
 |---|---|---|---|---|
@@ -114,7 +142,7 @@
 | `start_collector` | — | `()` | 📱 | 启动前台采集服务 |
 | `stop_collector` | — | `()` | 📱 | 停止前台采集服务 |
 
-### 2.6 事件 / 插件桥（非命令，供参考）
+### 2.7 事件 / 插件桥（非命令，供参考）
 
 不是可调用命令，而是**事件监听 / 移动插件桥**：
 - JS 监听 `usage`/`usage_event`（Kotlin UsagePlugin 推前台 app）、`notification`/`action_taken`（通知按钮响应）。
@@ -140,6 +168,8 @@
 | 知识：派发深研/批量 | ❌ | ✅ `run_knowledge_agent` | App 拉起 Codex |
 | 监控名单 增删查 | ✅ | ✅ | 两面同源 |
 | 主动计划（调度队列） | ❌ | ✅ `list_scheduled_actions` | 暂只读；写入在 core/app 内部 |
+| LifeItem 增删改查 / 关系 | ✅ | ✅ | 两面同源；App 写强制标记 local_dirty |
+| Notion 双向语义同步 | ✅ `LifeIndexSync` 白名单 | ✅ 手动触发/看状态 | 网关固定唯一 page ID；普通模式不可写 Notion |
 | 系统/权限/采集控制 | ❌ | ✅ | App/端侧专属 |
 
 **规律**：MCP 面偏"**理解 + 加工 + 沉淀**"（capture 闭环、知识工程、上下文），App 面偏"**展示 + 手动 CRUD + 端侧控制**"（任务/提醒 CRUD、规则引擎、权限、采集、主动计划）。两面共享 core 与同一 DB，能力重叠处（目标/上下文/知识列表/监控名单）保证同源不分叉。
