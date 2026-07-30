@@ -102,25 +102,16 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <header className="app-topbar">
-        <div className="flex items-center gap-2">
-          <span className="brand-mark">S</span>
-          <div>
-            <span className="brand-name">西西弗斯</span>
-            <span className="brand-subtitle">LOCAL COMPANION</span>
-          </div>
-        </div>
-        <div className="resident-status">
-          <span /> 感知中
-        </div>
-      </header>
-
       <div className="app-body">
         <nav className="app-sidebar" aria-label="主导航">
           <TabItem label="Agent" icon={<MessageCircle size={18} />} active={tab === "agent"} onClick={() => setTab("agent")} />
           <TabItem label="时间轴" icon={<Waves size={18} />} active={tab === "timeline"} onClick={() => setTab("timeline")} />
           <TabItem label="看板" icon={<LayoutGrid size={18} />} active={tab === "lifeindex"} onClick={() => setTab("lifeindex")} />
           <div className="sidebar-spacer" />
+          {/* 应用内标题栏已删除（系统标题栏已经在了）。常驻状态缩成侧栏底部一个点。 */}
+          <div className="resident-status" title="采集器常驻中">
+            <span /> 感知中
+          </div>
           <TabItem label="设置" icon={<Settings2 size={18} />} active={tab === "settings"} onClick={() => setTab("settings")} />
         </nav>
 

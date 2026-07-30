@@ -217,6 +217,7 @@ pub fn query_timeline(
     end_ms: i64,
     detail: String,
     max_items: Option<i64>,
+    fold: Option<String>,
 ) -> Result<sisyphus_core::timeline::TimelineResponse, String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
     sisyphus_core::timeline::query_timeline(
@@ -225,7 +226,19 @@ pub fn query_timeline(
         end_ms,
         &detail,
         max_items.unwrap_or(1_500),
+        fold.as_deref().unwrap_or("none"),
     )
+}
+
+/// 选区统计。`windows` 是 `[[start, end], …]`：
+/// 线性选区给一段，折叠视图的相位选区（"每天 22:00–02:00"）给每行一段。
+#[tauri::command]
+pub fn query_range_stats(
+    state: State<'_, AppState>,
+    windows: Vec<(i64, i64)>,
+) -> Result<sisyphus_core::timeline::RangeStats, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    sisyphus_core::timeline::range_stats(&conn, &windows)
 }
 
 #[tauri::command]

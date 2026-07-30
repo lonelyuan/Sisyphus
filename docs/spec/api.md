@@ -203,8 +203,13 @@
 - `propose_intents` 的 `kind` 增加 **`life_item`** 与 **`rule`**。
 - `upsert_life_item` 的 `kind` 增加 `skill` / `milestone`；新增 `area_id` / `success_criteria` /
   `target_value` / `current_value` / `unit`。
-- `query_timeline` 返回新增 `bucket` / `bands` / `plans`，`events[]` 增加 `level`（显著性等级）。
+- `query_timeline` 返回新增 `bucket` / `bands` / `plans`，`events[]` 增加 `level`（显著性等级）；
+  再新增入参 `fold`（`none|day|week|month|year`）与返回 `ticks` / `tick_unit` / `tick_minor_unit` /
+  `grid` / `cells` / `cell_kind` / `boundary_hour` —— **刻度与折叠网格的边界由 Core 给**，
+  前端不再用 `Date` 推日界（那样会偏到 UTC 午夜、和 rollup 日桶对不上）。详见
+  [lifeindex-mind-system.md](lifeindex-mind-system.md) §3.4–3.5。
 
 **Tauri 命令**同步新增：`kb_doctor` / `kb_wanted` / `kb_reindex` / `life_tree` / `next_actions` /
 `review_queue` / `list_life_areas` / `upsert_life_area` / `intervention_outcomes` / `rebuild_rollups` /
-`set_day_boundary_hour` / `get_day_boundary_hour` / `list_lifeindex_runs`。
+`set_day_boundary_hour` / `get_day_boundary_hour` / `list_lifeindex_runs` /
+`query_range_stats`（选区统计，接受多个时间窗口：线性选区 1 段，折叠视图的相位选区每行 1 段）。

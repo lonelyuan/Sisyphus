@@ -23,6 +23,7 @@ pub mod kb_doctor;
 pub mod sources;
 pub mod intervention;
 pub mod timeline;
+pub mod timeaxis;
 pub mod rollups;
 pub mod scheduler;
 pub mod lifeindex;

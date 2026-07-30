@@ -13,11 +13,12 @@
 
 use rusqlite::{params, Connection, Result};
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::clock;
 
 const SCOPE: &str = "behavior";
+const HOUR_MS: i64 = 3_600_000;
 
 /// 一个桶内某个维度键的聚合值。
 #[derive(Debug, Clone, Serialize)]
@@ -136,6 +137,7 @@ pub fn rebuild(conn: &Connection, full: bool) -> Result<usize> {
             );
             conn.execute(&sql, params![day_start, day_end, now, dimension])?;
         }
+        rebuild_hour_dimension(conn, *day_start, day_end, now)?;
     }
 
     // 3. 受影响的周/月桶由日桶再聚合（口径一致）。
@@ -154,12 +156,14 @@ pub fn rebuild(conn: &Connection, full: bool) -> Result<usize> {
             "DELETE FROM time_rollups WHERE bucket_kind=?1 AND bucket_start_ms=?2",
             params![bucket.as_str(), start],
         )?;
+        // hour 维度只在日桶有意义（"日内第几小时"跨周聚合就没有含义了），不往上滚。
         conn.execute(
             "INSERT INTO time_rollups
                (bucket_kind,bucket_start_ms,dimension,key,duration_ms,event_count,updated_at_ms)
              SELECT ?1, ?2, dimension, key, SUM(duration_ms), SUM(event_count), ?4
              FROM time_rollups
              WHERE bucket_kind='day' AND bucket_start_ms >= ?2 AND bucket_start_ms < ?3
+               AND dimension != 'hour'
              GROUP BY dimension, key",
             params![bucket.as_str(), start, end, now],
         )?;
@@ -167,6 +171,77 @@ pub fn rebuild(conn: &Connection, full: bool) -> Result<usize> {
 
     set_watermark(conn, max_ingested)?;
     Ok(days.len())
+}
+
+/// `hour` 维度：`key = "HH|category"`，`HH` 是**逻辑日内小时序号**（0 = 日起点那一小时）。
+///
+/// 为什么在 Rust 侧算：按本地小时切分会话在 SQL 里需要生成序列且要处理 DST，
+/// 而这里只是对当天的会话做一次线性扫描。序号从日起点算起 —— 这正好就是
+/// 折叠视图（actogram）的横轴位置，前端不需要再做任何时区换算。
+///
+/// DST 长日（25 小时）会出现序号 24，落在 24 列网格之外；前端按行宽裁剪即可。
+fn rebuild_hour_dimension(
+    conn: &Connection,
+    day_start: i64,
+    day_end: i64,
+    now: i64,
+) -> Result<()> {
+    let mut acc: HashMap<(i64, String), (i64, i64)> = HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT start_time, end_time, COALESCE(category, '(unknown)')
+             FROM raw_events
+             WHERE layer='raw' AND type='app_foreground'
+               AND start_time IS NOT NULL AND end_time IS NOT NULL
+               AND start_time < ?2 AND end_time > ?1",
+        )?;
+        let mut rows = stmt.query(params![day_start, day_end])?;
+        while let Some(row) = rows.next()? {
+            let start: i64 = row.get(0)?;
+            let end: i64 = row.get(1)?;
+            let category: String = row.get(2)?;
+            let from = start.max(day_start);
+            let to = end.min(day_end);
+            if to <= from {
+                continue;
+            }
+            let first = (from - day_start) / HOUR_MS;
+            let last = (to - 1 - day_start) / HOUR_MS;
+            for hour in first..=last {
+                let slot_start = day_start + hour * HOUR_MS;
+                let slot_end = (slot_start + HOUR_MS).min(day_end);
+                let overlap = to.min(slot_end) - from.max(slot_start);
+                if overlap <= 0 {
+                    continue;
+                }
+                let entry = acc.entry((hour, category.clone())).or_insert((0, 0));
+                entry.0 += overlap;
+                entry.1 += 1;
+            }
+        }
+    }
+    if acc.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = conn.prepare(
+        "INSERT INTO time_rollups
+           (bucket_kind,bucket_start_ms,dimension,key,duration_ms,event_count,updated_at_ms)
+         VALUES ('day',?1,'hour',?2,?3,?4,?5)
+         ON CONFLICT(bucket_kind,bucket_start_ms,dimension,key) DO UPDATE SET
+           duration_ms=excluded.duration_ms,
+           event_count=excluded.event_count,
+           updated_at_ms=excluded.updated_at_ms",
+    )?;
+    for ((hour, category), (duration, count)) in acc {
+        stmt.execute(params![
+            day_start,
+            format!("{hour:02}|{category}"),
+            duration,
+            count,
+            now
+        ])?;
+    }
+    Ok(())
 }
 
 /// 追平：只在**确实有新事件**时才重建（一次索引查询的代价）。
@@ -243,6 +318,76 @@ pub fn slices(
         )?
         .collect::<Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+/// 折叠视图（actogram）的小时单元格：一天 × 24 小时，带专注/娱乐/中性拆分与主导分类。
+///
+/// 这是**长跨度折叠唯一可行的数据源**：一年的原始会话有上万条，
+/// 而小时单元格最多 366 × 24 ≈ 8.8k 个，且已经是聚合值。
+#[derive(Debug, Clone, Serialize)]
+pub struct HourCell {
+    pub day_start_ms: i64,
+    /// 日内小时序号（0 = 逻辑日起点）。
+    pub hour: i32,
+    pub duration_ms: i64,
+    pub focus_ms: i64,
+    pub entertainment_ms: i64,
+    pub neutral_ms: i64,
+    pub top_category: Option<String>,
+}
+
+/// 读窗口内的小时单元格（按日桶的 `hour` 维度组装）。
+pub fn hour_cells(conn: &Connection, start_ms: i64, end_ms: i64) -> Result<Vec<HourCell>> {
+    let mut stmt = conn.prepare(
+        "SELECT bucket_start_ms, key, duration_ms
+         FROM time_rollups
+         WHERE bucket_kind='day' AND dimension='hour'
+           AND bucket_start_ms >= ?1 AND bucket_start_ms < ?2
+         ORDER BY bucket_start_ms ASC, key ASC",
+    )?;
+    let mut rows = stmt.query(params![start_ms, end_ms])?;
+    let mut out: Vec<HourCell> = Vec::new();
+    let mut top: i64 = 0;
+    while let Some(row) = rows.next()? {
+        let day: i64 = row.get(0)?;
+        let key: String = row.get(1)?;
+        let duration: i64 = row.get(2)?;
+        let (hour_part, category) = match key.split_once('|') {
+            Some((h, c)) => (h, c),
+            None => continue,
+        };
+        let hour: i32 = match hour_part.parse() {
+            Ok(h) => h,
+            Err(_) => continue,
+        };
+        let fresh = !matches!(out.last(), Some(c) if c.day_start_ms == day && c.hour == hour);
+        if fresh {
+            out.push(HourCell {
+                day_start_ms: day,
+                hour,
+                duration_ms: 0,
+                focus_ms: 0,
+                entertainment_ms: 0,
+                neutral_ms: 0,
+                top_category: None,
+            });
+            top = 0;
+        }
+        let cell = out.last_mut().expect("刚推入");
+        cell.duration_ms += duration;
+        if category.starts_with("entertainment") {
+            cell.entertainment_ms += duration;
+        } else if category == "(unknown)" {
+            cell.neutral_ms += duration;
+        } else {
+            cell.focus_ms += duration;
+        }
+        if duration > top {
+            top = duration;
+            cell.top_category = Some(category.to_string());
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -344,5 +489,76 @@ mod tests {
         assert_eq!(Bucket::from_span(7 * DAY), Bucket::Day);
         assert_eq!(Bucket::from_span(120 * DAY), Bucket::Week);
         assert_eq!(Bucket::from_span(3000 * DAY), Bucket::Month);
+    }
+
+    #[test]
+    fn hour_dimension_splits_session_across_hours() {
+        let conn = db::open(":memory:").unwrap();
+        let day_start = clock::day_start_at(clock::now_ms(), 0);
+        // 09:30 → 11:15：第 9 小时 30min、第 10 小时 60min、第 11 小时 15min。
+        let start = day_start + 9 * HOUR_MS + 1_800_000;
+        session(&conn, start, start + 6_300_000, "work", "com.apple.Terminal");
+        rebuild(&conn, false).unwrap();
+
+        let cells = hour_cells(&conn, day_start, day_start + 86_400_000).unwrap();
+        let at = |hour: i32| {
+            cells
+                .iter()
+                .find(|c| c.hour == hour)
+                .map(|c| c.duration_ms)
+                .unwrap_or(0)
+        };
+        assert_eq!(at(9), 1_800_000);
+        assert_eq!(at(10), 3_600_000);
+        assert_eq!(at(11), 900_000);
+        // 与 category 维度同口径：小时之和 = 当天该分类总时长。
+        let day = slices(&conn, Bucket::Day, "category", day_start, day_start + 1).unwrap();
+        let total: i64 = cells.iter().map(|c| c.duration_ms).sum();
+        assert_eq!(total, day.iter().map(|s| s.duration_ms).sum::<i64>());
+    }
+
+    #[test]
+    fn hour_cell_carries_split_and_top_category() {
+        let conn = db::open(":memory:").unwrap();
+        let day_start = clock::day_start_at(clock::now_ms(), 0);
+        let hour = day_start + 14 * HOUR_MS;
+        // 同一小时内：娱乐 40min + 工作 10min。
+        session(&conn, hour, hour + 2_400_000, "entertainment.video", "bili");
+        session(&conn, hour + 2_400_000, hour + 3_000_000, "work", "term");
+        rebuild(&conn, false).unwrap();
+
+        let cells = hour_cells(&conn, day_start, day_start + 86_400_000).unwrap();
+        let cell = cells.iter().find(|c| c.hour == 14).unwrap();
+        assert_eq!(cell.entertainment_ms, 2_400_000);
+        assert_eq!(cell.focus_ms, 600_000);
+        assert_eq!(cell.top_category.as_deref(), Some("entertainment.video"));
+    }
+
+    #[test]
+    fn hour_dimension_does_not_roll_up_to_week() {
+        // "日内第几小时"跨周聚合没有含义，周/月桶里不该出现 hour 维度。
+        let conn = db::open(":memory:").unwrap();
+        let day_start = clock::day_start_at(clock::now_ms(), 0);
+        session(&conn, day_start + HOUR_MS, day_start + 2 * HOUR_MS, "work", "t");
+        rebuild(&conn, false).unwrap();
+        let week_start = clock::week_start_at(clock::now_ms(), 0);
+        let hours = slices(&conn, Bucket::Week, "hour", week_start, week_start + 1).unwrap();
+        assert!(hours.is_empty(), "周桶不该有 hour 维度");
+        assert!(!hour_cells(&conn, day_start, day_start + 86_400_000)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn hour_dimension_is_idempotent_on_rebuild() {
+        let conn = db::open(":memory:").unwrap();
+        let day_start = clock::day_start_at(clock::now_ms(), 0);
+        session(&conn, day_start + HOUR_MS, day_start + 2 * HOUR_MS, "work", "t");
+        rebuild(&conn, false).unwrap();
+        let first = hour_cells(&conn, day_start, day_start + 86_400_000).unwrap();
+        rebuild(&conn, true).unwrap();
+        let second = hour_cells(&conn, day_start, day_start + 86_400_000).unwrap();
+        assert_eq!(first.len(), second.len());
+        assert_eq!(first[0].duration_ms, second[0].duration_ms);
     }
 }

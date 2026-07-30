@@ -370,6 +370,7 @@ pub fn run() {
             commands::set_reminder_status,
             commands::list_interventions,
             commands::query_timeline,
+            commands::query_range_stats,
             commands::list_knowledge,
             commands::list_scheduled_actions,
             commands::list_monitored_apps,

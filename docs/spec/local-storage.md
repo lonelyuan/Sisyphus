@@ -125,6 +125,8 @@ ORDER BY start_time DESC LIMIT 1;
 ### `time_rollups` / `rollup_state` — 无极时间线预聚合
 
 桶按**逻辑日**切（本地时区 + 换日点），周/月桶由日桶再聚合。`rollup_state.watermark_ms` 支撑增量重建。
+维度三个：`category` / `app` / `hour`（`hour` 的 key 是 `"HH|category"`，`HH` 为逻辑日内小时序号，
+**只存在于日桶**，周/月再聚合显式排除）。
 **改换日点必须整体重算**（桶边界变了，旧桶口径失效）。详见 [lifeindex-mind-system.md](lifeindex-mind-system.md) §3.2。
 
 ### LifeDB — `life_items` / `life_item_edges`

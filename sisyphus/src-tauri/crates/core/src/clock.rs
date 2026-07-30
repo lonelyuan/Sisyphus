@@ -23,7 +23,9 @@ pub fn boundary_hour(conn: &Connection) -> u32 {
         .unwrap_or(DEFAULT_BOUNDARY_HOUR)
 }
 
-fn local_at(ms: i64) -> DateTime<Local> {
+/// `ms` 的本地时间。**时间轴的刻度与折叠标签必须经这里格式化**，
+/// 否则前端用 `Date` 自己算会绕过换日点、拿到与桶不一致的日界。
+pub fn local_at(ms: i64) -> DateTime<Local> {
     Local
         .timestamp_millis_opt(ms)
         .single()
@@ -89,6 +91,54 @@ pub fn month_start_at(ms: i64, boundary_hour: u32) -> i64 {
     let d = logical_date_at(ms, boundary_hour);
     let first = NaiveDate::from_ymd_opt(d.year(), d.month(), 1).unwrap_or(d);
     local_date_hour_ms(first, boundary_hour)
+}
+
+/// `ms` 所在逻辑周的终点（= 下周起点）。
+pub fn week_end_at(ms: i64, boundary_hour: u32) -> i64 {
+    let start = week_start_at(ms, boundary_hour);
+    // 加 8 天再对齐，跨过 DST 也仍落在下一周内。
+    week_start_at(start + 8 * 86_400_000, boundary_hour)
+}
+
+/// `ms` 所在逻辑月的终点（= 下月起点）。
+pub fn month_end_at(ms: i64, boundary_hour: u32) -> i64 {
+    let start = month_start_at(ms, boundary_hour);
+    month_start_at(start + 32 * 86_400_000, boundary_hour)
+}
+
+/// `ms` 所在季度的起点（1/4/7/10 月 1 日）。
+pub fn quarter_start_at(ms: i64, boundary_hour: u32) -> i64 {
+    let d = logical_date_at(ms, boundary_hour);
+    let month = (d.month() - 1) / 3 * 3 + 1;
+    let first = NaiveDate::from_ymd_opt(d.year(), month, 1).unwrap_or(d);
+    local_date_hour_ms(first, boundary_hour)
+}
+
+/// `ms` 所在季度的终点（= 下一季度起点）。
+pub fn quarter_end_at(ms: i64, boundary_hour: u32) -> i64 {
+    let start = quarter_start_at(ms, boundary_hour);
+    quarter_start_at(start + 95 * 86_400_000, boundary_hour)
+}
+
+/// `ms` 所在逻辑年的起点（1 月 1 日）。
+pub fn year_start_at(ms: i64, boundary_hour: u32) -> i64 {
+    let d = logical_date_at(ms, boundary_hour);
+    let first = NaiveDate::from_ymd_opt(d.year(), 1, 1).unwrap_or(d);
+    local_date_hour_ms(first, boundary_hour)
+}
+
+/// `ms` 所在逻辑年的终点（= 次年起点）。
+pub fn year_end_at(ms: i64, boundary_hour: u32) -> i64 {
+    let d = logical_date_at(ms, boundary_hour);
+    let first = NaiveDate::from_ymd_opt(d.year() + 1, 1, 1).unwrap_or(d);
+    local_date_hour_ms(first, boundary_hour)
+}
+
+/// `ms` 所在逻辑日是星期几（0 = 周一）。
+pub fn logical_weekday(ms: i64, boundary_hour: u32) -> u32 {
+    logical_date_at(ms, boundary_hour)
+        .weekday()
+        .num_days_from_monday()
 }
 
 // ── 便捷封装（读 settings 的换日点）────────────────────────────────────────────
