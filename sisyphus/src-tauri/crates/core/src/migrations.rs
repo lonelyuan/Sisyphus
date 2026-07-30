@@ -12,7 +12,7 @@
 use rusqlite::{Connection, Result};
 
 /// 当前目标版本。加迁移时 +1 并在 [`apply`] 里加分支。
-pub const TARGET_VERSION: i64 = 5;
+pub const TARGET_VERSION: i64 = 6;
 
 pub fn run(conn: &Connection) -> Result<()> {
     let mut version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -34,6 +34,7 @@ fn apply(conn: &Connection, version: i64) -> Result<()> {
         3 => v3_import_legacy_into_lifedb(conn),
         4 => v4_knowledge_title_uniqueness(conn),
         5 => v5_seed_default_areas(conn),
+        6 => v6_seed_progress_ledger(conn),
         _ => Ok(()),
     }
 }
@@ -300,6 +301,59 @@ fn v5_seed_default_areas(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+// ── v6：进度账本（技能树时间播放的数据源）──────────────────────────────────────
+
+/// 老库补上 `life_item_progress`，并做一次**近似**回填。
+///
+/// 老库没有真历史，所以只能给每个 item 两个锚点：`created_at` 的初始态与 `updated_at` 的当前态，
+/// `origin='backfill'` 明确标注它是近似的——不假装拥有从未记录过的中间过程。
+/// 从这次迁移之后，`lifedb::upsert_item` / `archive_item` 会写下真实的每一次变更。
+fn v6_seed_progress_ledger(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS life_item_progress (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id       TEXT NOT NULL,
+    at_ms         INTEGER NOT NULL,
+    status        TEXT,
+    current_value REAL,
+    target_value  REAL,
+    revision      INTEGER NOT NULL DEFAULT 0,
+    origin        TEXT NOT NULL,
+    FOREIGN KEY (item_id) REFERENCES life_items(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_life_progress_item ON life_item_progress (item_id, at_ms);
+CREATE INDEX IF NOT EXISTS idx_life_progress_time ON life_item_progress (at_ms);
+"#,
+    )?;
+    if !table_exists(conn, "life_items")? {
+        return Ok(());
+    }
+    // 幂等：已回填过就不再来一遍（用户此后的真实变更不会被重复的锚点污染）。
+    let seeded: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM life_item_progress WHERE origin='backfill'",
+        [],
+        |r| r.get(0),
+    )?;
+    if seeded > 0 {
+        return Ok(());
+    }
+    let metrics = has_column(conn, "life_items", "current_value")?;
+    let current = if metrics { "current_value" } else { "NULL" };
+    let target = if metrics { "target_value" } else { "NULL" };
+    // 出生锚点：inbox 是 status 的默认值，也是任何 item 的起点。
+    conn.execute_batch(&format!(
+        r#"
+INSERT INTO life_item_progress (item_id,at_ms,status,current_value,target_value,revision,origin)
+SELECT id, created_at, 'inbox', NULL, NULL, 0, 'backfill' FROM life_items;
+INSERT INTO life_item_progress (item_id,at_ms,status,current_value,target_value,revision,origin)
+SELECT id, MAX(updated_at, created_at + 1), status, {current}, {target}, revision, 'backfill'
+FROM life_items;
+"#
+    ))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,11 +428,32 @@ CREATE TABLE life_areas (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, descrip
             .query_row("SELECT COUNT(*) FROM life_areas", [], |r| r.get(0))
             .unwrap();
         assert!(areas >= 6);
+        // 进度账本已建表并回填（老库没有真历史，两个锚点标为 backfill）
+        let anchors: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM life_item_progress WHERE item_id='a' AND origin='backfill'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(anchors, 2);
         // 版本推进 + 重复运行幂等
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v, TARGET_VERSION);
         run(&conn).unwrap();
+        v6_seed_progress_ledger(&conn).unwrap();
+        let anchors_again: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM life_item_progress WHERE origin='backfill'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            anchors_again, 2,
+            "重跑不重复回填（'s' 是迁移后插的，本来就没有锚点）"
+        );
     }
 }

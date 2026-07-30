@@ -60,10 +60,15 @@ MCP 工具面（`sisyphus` server）完整签名与用法。所有工具即使�
 - 三个正交维度：`track=main|side|neutral|undecided`，`horizon=now|next|later|someday|unscheduled`，
   `area_id`（责任领域，`list_life_areas` 取；`focus` 领域参与主线推导）。
 - 可判定字段：`success_criteria`（goal/milestone 尽量填，否则永远无法收敛）、`target_value`/`current_value`/`unit`（度量）、`review_at_ms`（idea 的毕业审查，建议 +7 天）。
-- 读模型：`life_tree`（技能树/目标分解 + **Core 算好的进度**）、`review_queue`（周回顾问题）、`next_actions`（下一步）。
+- 读模型：`life_tree`（技能树/目标分解 + **Core 算好的进度**）、`skill_map`（能力全景图：领域扇区 + 技能点 + 前置边 + 四态）、`review_queue`（周回顾问题）、`next_actions`（下一步）。
+- 谈"下一步学什么 / 我会什么 / 还差什么"先读 `skill_map`：每个节点带 `attained | in_progress | available | locked`；
+  **不要把 `locked` 的技能推荐给用户**，先看 `blocked_by` 里缺的前置。`at_ms` 可看历史时刻（走进度账本）。
+- 领域（`life_areas`）是背景不是节点：它没有完成态，别给它建 skill 节点、也别问它"完成了吗"。
 - 先 `capture` 原话，复述你准备写入的最小结构；用户认可后调用 `upsert_life_item(origin="agent")`。
 - 未知字段保持 `undecided/unscheduled/inbox`，不要为了整齐猜时间、主次和优先级。
 - 目标/项目包含子项时用 `link_life_items(relation="contains")`；不要一次生成任务海。
+- 技能的前置关系用 `link_life_items(relation="depends_on")`（依赖者 → 前置）；技能的等级刻度是挂在它下面的
+  `milestone`（`contains`）。进度、解锁状态一律读 Core，**不要自己估**。
 - App/Agent 写入会自动标 `local_dirty` 并排队；普通会话不直接改 Notion。
 - 专用 `LifeIndexSync` 按 [notion-integration.md](../../../docs/spec/notion-integration.md) 三方合并；更新已有项带 `id + expected_revision`，写回成功才 complete。
 

@@ -777,9 +777,30 @@ pub fn life_tree(
     sisyphus_core::lifetree::forest(&conn, &refs)
 }
 
+/// 技能树地图：背景扇区（责任领域）+ 技能点 + 前置边 + 环外想法。
+/// `at_ms` 给出历史时刻则走进度账本回放，口径与"现在"完全一致。
 #[tauri::command]
-pub fn next_actions(
+pub fn skill_map(
     state: State<AppState>,
+    at_ms: Option<i64>,
+) -> Result<sisyphus_core::skillmap::SkillMap, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    sisyphus_core::skillmap::skill_map(&conn, at_ms)
+}
+
+/// 生长史（时间播放）：只返回进度真的变化的那些时刻，前端插值即可，不重算聚合。
+#[tauri::command]
+pub fn skill_tree_growth(
+    state: State<AppState>,
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<sisyphus_core::skillmap::Growth, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    sisyphus_core::skillmap::growth(&conn, from_ms, to_ms)
+}
+
+#[tauri::command]
+pub fn next_actions(    state: State<AppState>,
     limit: Option<i64>,
 ) -> Result<Vec<sisyphus_core::lifetree::NextAction>, String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;

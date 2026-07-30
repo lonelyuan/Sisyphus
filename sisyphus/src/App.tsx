@@ -1,14 +1,15 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { invoke, addPluginListener, type PluginListener } from "@tauri-apps/api/core";
 import { platform as osPlatform } from "@tauri-apps/plugin-os";
-import { MessageCircle, Settings2, Waves, LayoutGrid } from "lucide-react";
+import { MessageCircle, Settings2, Waves, LayoutGrid, Network } from "lucide-react";
 import AgentScreen from "./screens/AgentScreen";
 import TimelineScreen from "./screens/TimelineScreen";
 import LifeIndexScreen from "./screens/LifeIndexScreen";
+import SkillTreeScreen from "./screens/SkillTreeScreen";
 import SettingsScreen from "./screens/SettingsScreen";
 import { cn } from "@/lib/utils";
 
-type Tab = "agent" | "timeline" | "lifeindex" | "settings";
+type Tab = "agent" | "timeline" | "lifeindex" | "skilltree" | "settings";
 
 interface UsageEvent {
   pkg: string;
@@ -107,6 +108,7 @@ export default function App() {
           <TabItem label="Agent" icon={<MessageCircle size={18} />} active={tab === "agent"} onClick={() => setTab("agent")} />
           <TabItem label="时间轴" icon={<Waves size={18} />} active={tab === "timeline"} onClick={() => setTab("timeline")} />
           <TabItem label="看板" icon={<LayoutGrid size={18} />} active={tab === "lifeindex"} onClick={() => setTab("lifeindex")} />
+          <TabItem label="技能树" icon={<Network size={18} />} active={tab === "skilltree"} onClick={() => setTab("skilltree")} />
           <div className="sidebar-spacer" />
           {/* 应用内标题栏已删除（系统标题栏已经在了）。常驻状态缩成侧栏底部一个点。 */}
           <div className="resident-status" title="采集器常驻中">
@@ -130,6 +132,11 @@ export default function App() {
               <LifeIndexScreen />
             </div>
           )}
+          {tab === "skilltree" && (
+            <div className="app-panel skilltree-panel">
+              <SkillTreeScreen />
+            </div>
+          )}
           {tab === "settings" && (
             <div className="app-panel settings-panel">
               <SettingsScreen />
@@ -142,6 +149,7 @@ export default function App() {
         <TabItem label="Agent" icon={<MessageCircle size={18} />} active={tab === "agent"} onClick={() => setTab("agent")} />
         <TabItem label="时间轴" icon={<Waves size={18} />} active={tab === "timeline"} onClick={() => setTab("timeline")} />
         <TabItem label="看板" icon={<LayoutGrid size={18} />} active={tab === "lifeindex"} onClick={() => setTab("lifeindex")} />
+        <TabItem label="技能树" icon={<Network size={18} />} active={tab === "skilltree"} onClick={() => setTab("skilltree")} />
         <TabItem label="设置" icon={<Settings2 size={18} />} active={tab === "settings"} onClick={() => setTab("settings")} />
       </nav>
     </div>

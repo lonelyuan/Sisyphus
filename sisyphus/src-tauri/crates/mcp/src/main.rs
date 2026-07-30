@@ -154,6 +154,13 @@ pub struct LifeTreeReq {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SkillMapReq {
+    /// 看某个历史时刻的样子（epoch ms）。省略=现在。
+    #[serde(default)]
+    pub at_ms: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct UpsertLifeAreaReq {
     /// 领域名（按名字幂等）
     pub name: String,
@@ -1003,9 +1010,20 @@ impl SisyphusServer {
     }
 
     #[tool(
-        description = "今日最小行动（确定性选择 + **每条带理由**）：逾期 → 已排在当下 → 临近截止 → 主线/重点领域下最浅的未完成事项 → 今日日常 → 候选下一步 → 待安排。规划时用它，别自己从列表里挑。返回 JSON [{item_id,title,kind,track,due_at_ms,reason}]。"
+        description = "技能树地图（能力全景，和 life_tree 的区别是它是**图**而不是嵌套树）：sectors=责任领域扇区（背景，永不是节点）、nodes=技能点与它们环上的里程碑刻度、edges=前置边（已把 blocks 规范化成 depends_on）、ideas=还没决定要不要变成能力的想法。每个节点带四态之一：attained 已掌握 / in_progress 在进展 / available 可解锁 / locked 锁定（blocked_by 说得出缺哪个前置）。想提「下一步学什么」时先读它——不要把 locked 的技能推荐给用户。at_ms 给历史时刻则按进度账本回放。"
     )]
-    fn next_actions(
+    fn skill_map(
+        &self,
+        Parameters(SkillMapReq { at_ms }): Parameters<SkillMapReq>,
+    ) -> Result<String, String> {
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let map = sisyphus_core::skillmap::skill_map(&conn, at_ms)?;
+        serde_json::to_string_pretty(&map).map_err(|e| format!("序列化失败: {e}"))
+    }
+
+    #[tool(
+        description = "今日最小行动（确定性选择 + **每条带理由**）：逾期 → 已排在当下 → 临近截止 → 主线/重点领域下最浅的未完成事项 → 今日日常 → 候选下一步 → 待安排。规划时用它，别自己从列表里挑。返回 JSON [{item_id,title,kind,track,due_at_ms,reason}]。"
+    )]    fn next_actions(
         &self,
         Parameters(LimitReq { limit }): Parameters<LimitReq>,
     ) -> Result<String, String> {
