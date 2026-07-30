@@ -11,7 +11,18 @@ use uuid::Uuid;
 
 use crate::scheduler::{self, NewAction};
 
-const KINDS: &[&str] = &["idea", "goal", "project", "action", "routine"];
+/// LifeItem 的五种基本形态 + 技能树两种：
+/// - `skill`：能力节点。前置关系用 `depends_on` 边，等级/阶段用 `contains` 边挂 `milestone`。
+/// - `milestone`：可判定的检查点（目标拆解的产物），同时是无极时间线上的抽象层标记。
+const KINDS: &[&str] = &[
+    "idea",
+    "goal",
+    "project",
+    "action",
+    "routine",
+    "skill",
+    "milestone",
+];
 const TRACKS: &[&str] = &["main", "side", "neutral", "undecided"];
 const HORIZONS: &[&str] = &["now", "next", "later", "someday", "unscheduled"];
 const STATUSES: &[&str] = &["inbox", "active", "waiting", "done", "archived"];
@@ -38,6 +49,14 @@ pub struct LifeItem {
     pub track: String,
     pub horizon: String,
     pub status: String,
+    /// 责任领域（GTD Horizon 3）。→ `life_areas.id`。
+    pub area_id: Option<String>,
+    /// 可判定的完成条件（OKR 的 key result）。缺它的 goal 永远无法收敛。
+    pub success_criteria: Option<String>,
+    /// 度量：目标值 / 当前值 / 单位。技能树的进度由它确定性算出。
+    pub target_value: Option<f64>,
+    pub current_value: Option<f64>,
+    pub unit: Option<String>,
     pub start_at_ms: Option<i64>,
     pub due_at_ms: Option<i64>,
     pub review_at_ms: Option<i64>,
@@ -49,6 +68,18 @@ pub struct LifeItem {
     pub created_at: i64,
     pub updated_at: i64,
     pub external_refs: Vec<LifeExternalRef>,
+}
+
+/// 责任领域：无完成态，只需维持标准。`focus` 标记当前重点，用于推导主线/支线。
+#[derive(Debug, Clone, Serialize)]
+pub struct LifeArea {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub sort_order: i64,
+    pub focus: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -100,6 +131,18 @@ pub struct LifeItemInput {
     pub horizon: String,
     #[serde(default = "default_status")]
     pub status: String,
+    /// 责任领域 id（可空；不猜）。
+    #[serde(default)]
+    pub area_id: Option<String>,
+    /// 可判定完成条件。goal/milestone 建议必填，但 Core 不强制（宁缺毋滥优先）。
+    #[serde(default)]
+    pub success_criteria: Option<String>,
+    #[serde(default)]
+    pub target_value: Option<f64>,
+    #[serde(default)]
+    pub current_value: Option<f64>,
+    #[serde(default)]
+    pub unit: Option<String>,
     #[serde(default)]
     pub start_at_ms: Option<i64>,
     #[serde(default)]
@@ -117,6 +160,34 @@ pub struct LifeItemInput {
     pub origin: String,
     #[serde(default)]
     pub external_ref: Option<ExternalRefInput>,
+}
+
+impl Default for LifeItemInput {
+    fn default() -> Self {
+        Self {
+            id: None,
+            expected_revision: None,
+            kind: "idea".to_string(),
+            title: String::new(),
+            body: String::new(),
+            track: default_track(),
+            horizon: default_horizon(),
+            status: default_status(),
+            area_id: None,
+            success_criteria: None,
+            target_value: None,
+            current_value: None,
+            unit: None,
+            start_at_ms: None,
+            due_at_ms: None,
+            review_at_ms: None,
+            recurrence: None,
+            source_event_id: None,
+            intent_id: None,
+            origin: default_origin(),
+            external_ref: None,
+        }
+    }
 }
 
 fn default_track() -> String {
@@ -179,7 +250,8 @@ pub fn upsert_item(conn: &Connection, mut input: LifeItemInput) -> Result<String
                 kind=?2,title=?3,body=?4,track=?5,horizon=?6,status=?7,
                 start_at_ms=?8,due_at_ms=?9,review_at_ms=?10,recurrence=?11,
                 source_event_id=COALESCE(?12,source_event_id),intent_id=COALESCE(?13,intent_id),
-                sync_status=?14,revision=revision+1,updated_at=?15,archived_at=?16
+                sync_status=?14,revision=revision+1,updated_at=?15,archived_at=?16,
+                area_id=?18,success_criteria=?19,target_value=?20,current_value=?21,unit=?22
              WHERE id=?1 AND (?17 IS NULL OR revision=?17)",
                 params![
                     id,
@@ -199,6 +271,11 @@ pub fn upsert_item(conn: &Connection, mut input: LifeItemInput) -> Result<String
                     now,
                     archived_at,
                     input.expected_revision,
+                    input.area_id,
+                    input.success_criteria,
+                    input.target_value,
+                    input.current_value,
+                    input.unit,
                 ],
             )
             .map_err(|e| format!("更新 LifeItem 失败: {e}"))?;
@@ -211,8 +288,9 @@ pub fn upsert_item(conn: &Connection, mut input: LifeItemInput) -> Result<String
         conn.execute(
             "INSERT INTO life_items
                (id,kind,title,body,track,horizon,status,start_at_ms,due_at_ms,review_at_ms,
-                recurrence,source_event_id,intent_id,sync_status,revision,created_at,updated_at,archived_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,1,?15,?15,?16)",
+                recurrence,source_event_id,intent_id,sync_status,revision,created_at,updated_at,archived_at,
+                area_id,success_criteria,target_value,current_value,unit)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,1,?15,?15,?16,?17,?18,?19,?20,?21)",
             params![
                 id,
                 input.kind,
@@ -230,6 +308,11 @@ pub fn upsert_item(conn: &Connection, mut input: LifeItemInput) -> Result<String
                 sync_status,
                 now,
                 archived_at,
+                input.area_id,
+                input.success_criteria,
+                input.target_value,
+                input.current_value,
+                input.unit,
             ],
         )
         .map_err(|e| format!("创建 LifeItem 失败: {e}"))?;
@@ -244,9 +327,13 @@ pub fn upsert_item(conn: &Connection, mut input: LifeItemInput) -> Result<String
     Ok(id)
 }
 
+pub const ITEM_COLUMNS: &str = "id,kind,title,body,track,horizon,status,start_at_ms,due_at_ms,\
+     review_at_ms,recurrence,source_event_id,intent_id,sync_status,revision,created_at,updated_at,\
+     area_id,success_criteria,target_value,current_value,unit";
+
 pub fn list_items(conn: &Connection, include_archived: bool) -> Result<Vec<LifeItem>, String> {
-    let sql = "SELECT id,kind,title,body,track,horizon,status,start_at_ms,due_at_ms,review_at_ms,
-                      recurrence,source_event_id,intent_id,sync_status,revision,created_at,updated_at
+    let sql = format!(
+        "SELECT {ITEM_COLUMNS}
                FROM life_items
                WHERE (?1=1 OR status!='archived')
                ORDER BY
@@ -255,8 +342,9 @@ pub fn list_items(conn: &Connection, include_archived: bool) -> Result<Vec<LifeI
                               WHEN 'someday' THEN 3 ELSE 4 END,
                  CASE status WHEN 'active' THEN 0 WHEN 'inbox' THEN 1 WHEN 'waiting' THEN 2
                              WHEN 'done' THEN 3 ELSE 4 END,
-                 updated_at DESC";
-    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+                 updated_at DESC"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(params![include_archived as i64], row_to_item)
         .map_err(|e| e.to_string())?
@@ -389,6 +477,13 @@ pub fn render_projection(conn: &Connection, target_id: &str) -> Result<LifeProje
         &mut markdown,
         "♻️ 日常",
         items.iter().filter(|x| x.kind == "routine"),
+    );
+    append_section(
+        &mut markdown,
+        "🌳 技能与里程碑",
+        items
+            .iter()
+            .filter(|x| x.kind == "skill" || x.kind == "milestone"),
     );
     append_section(
         &mut markdown,
@@ -621,7 +716,7 @@ fn validate_value(name: &str, value: &str, allowed: &[&str]) -> Result<(), Strin
     }
 }
 
-fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<LifeItem> {
+pub fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<LifeItem> {
     Ok(LifeItem {
         id: r.get(0)?,
         kind: r.get(1)?,
@@ -640,6 +735,11 @@ fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<LifeItem> {
         revision: r.get(14)?,
         created_at: r.get(15)?,
         updated_at: r.get(16)?,
+        area_id: r.get(17)?,
+        success_criteria: r.get(18)?,
+        target_value: r.get(19)?,
+        current_value: r.get(20)?,
+        unit: r.get(21)?,
         external_refs: Vec::new(),
     })
 }
@@ -695,6 +795,125 @@ pub fn request_sync(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+// ── 责任领域（GTD Horizon 3）────────────────────────────────────────────────
+
+pub fn list_areas(conn: &Connection) -> Result<Vec<LifeArea>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id,name,description,sort_order,focus,created_at,updated_at
+             FROM life_areas ORDER BY focus DESC, sort_order ASC, name ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(LifeArea {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                description: r.get(2)?,
+                sort_order: r.get(3)?,
+                focus: r.get::<_, i64>(4)? != 0,
+                created_at: r.get(5)?,
+                updated_at: r.get(6)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+/// 按名字幂等 upsert 一个领域，返回 id。`focus=Some(true)` 标为当前重点。
+pub fn upsert_area(
+    conn: &Connection,
+    name: &str,
+    description: Option<&str>,
+    focus: Option<bool>,
+) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("领域名不能为空".to_string());
+    }
+    let now = now_ms();
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM life_areas WHERE name=?1",
+            params![name],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let id = existing.unwrap_or_else(|| Uuid::new_v4().to_string());
+    conn.execute(
+        "INSERT INTO life_areas (id,name,description,sort_order,focus,created_at,updated_at)
+         VALUES (?1,?2,COALESCE(?3,''),0,COALESCE(?4,0),?5,?5)
+         ON CONFLICT(id) DO UPDATE SET
+           description=COALESCE(?3, description),
+           focus=COALESCE(?4, focus),
+           updated_at=excluded.updated_at",
+        params![id, name, description, focus.map(|f| f as i64), now],
+    )
+    .map_err(|e| format!("写入领域失败: {e}"))?;
+    Ok(id)
+}
+
+// ── Notion 回滚（整页替换的安全网）──────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LifeSyncRun {
+    pub id: String,
+    pub target_id: String,
+    pub remote_before_text: String,
+    pub final_snapshot_text: String,
+    pub summary: String,
+    pub completed_at_ms: i64,
+}
+
+/// 列出历史同步轮次（不含全文，避免上下文爆掉；预览截断到 200 字）。
+pub fn list_sync_runs(
+    conn: &Connection,
+    target_id: &str,
+    limit: i64,
+) -> Result<Vec<LifeSyncRun>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id,target_id,SUBSTR(remote_before_text,1,200),SUBSTR(final_snapshot_text,1,200),
+                    summary,completed_at_ms
+             FROM life_sync_runs WHERE provider='notion' AND target_id=?1
+             ORDER BY completed_at_ms DESC LIMIT ?2",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![target_id, limit], |r| {
+            Ok(LifeSyncRun {
+                id: r.get(0)?,
+                target_id: r.get(1)?,
+                remote_before_text: r.get(2)?,
+                final_snapshot_text: r.get(3)?,
+                summary: r.get(4)?,
+                completed_at_ms: r.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+/// 取某一轮的**写回前全文**，用于把 Notion 页恢复成同步前的样子。
+///
+/// 整页替换是这条链路上唯一不可逆的一步：语义合并出错一次，用户手写内容整页被覆盖。
+/// `life_sync_runs` 一直在存写前全文，但此前没有任何读取入口——补上它，同步才敢开。
+pub fn sync_run_remote_before(conn: &Connection, run_id: &str) -> Result<String, String> {
+    conn.query_row(
+        "SELECT remote_before_text FROM life_sync_runs WHERE id=?1",
+        params![run_id],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| format!("同步轮次不存在: {run_id}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,6 +945,7 @@ mod tests {
                 intent_id: None,
                 origin: "app".into(),
                 external_ref: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -751,6 +971,7 @@ mod tests {
                 intent_id: None,
                 origin: "notion".into(),
                 external_ref: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -780,6 +1001,7 @@ mod tests {
             intent_id: None,
             origin: "import".into(),
             external_ref: None,
+            ..Default::default()
         };
         let project = upsert_item(&conn, make("project", "学吉他", "side")).unwrap();
         let action = upsert_item(&conn, make("action", "买琴弦", "side")).unwrap();
@@ -813,6 +1035,7 @@ mod tests {
                 intent_id: None,
                 origin: "app".into(),
                 external_ref: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -838,6 +1061,7 @@ mod tests {
                 intent_id: None,
                 origin: "app".into(),
                 external_ref: None,
+                ..Default::default()
             },
         )
         .unwrap();

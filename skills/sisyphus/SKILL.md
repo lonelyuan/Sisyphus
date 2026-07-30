@@ -13,12 +13,28 @@ description: Sisyphus 项目专用的意图工程与 Core 状态同步入口。�
 - **产品/开发任务**：修 bug、写代码、跑测试、改文档、设计数据模型 → 不调用 `capture`；把本 skill 与 references 当作产品契约，正常修改和验证仓库。
 - **知识库反思**：本项目为 `knowledge_reflection: off`。陈述性内容路由为 Core 的 `note` 意图，不调用 Obsidian 知识工具。
 
-## 四条铁律
+## 五条铁律
 
 1. **零压力优先**：用户态输入先 `capture(text)` 原样收下（永不丢失），再处理。普通开发指令禁止 capture。不要用连环追问打断记录。
 2. **你负责识别意图，Core 只存数据**。一条输入可能含多个意图，分别路由。分不清就先 capture，只问一句最关键的。
-3. **只提最小下一步，不生成任务海**。落库前用一句话跟用户确认（认可 / 修改 / 忽略）。
-4. **语气**：关心但不评判、具体（引用真实时长 / 目标 / 数据）、不羞辱不说教。详见 [references/tone.md](references/tone.md)。
+3. **只提最小下一步，不生成任务海**。
+4. **确认成本按可逆性分级**（别每条都问，一天十次打断就是摩擦本身）：
+   - `note` / `idea`：**直接落**（可逆、无副作用、不产生打扰）
+   - `task` / `reminder` / `life_item`：一句话复述确认
+   - `goal` / `detection_rule` / `add_monitored_app`：**必须确认**（会改变干预行为、会产生通知）
+5. **语气**：关心但不评判、具体（引用真实时长 / 目标 / 数据）、不羞辱不说教。详见 [references/tone.md](references/tone.md)。
+
+## 确定性的部分不要自己算
+
+Core 已经把这些算好了，**直接用返回值**，不要在上下文里自己推：
+
+| 想知道 | 用这个 | 不要 |
+|---|---|---|
+| 今天该做什么 | `next_actions`（带 `reason`）| 自己从 `list_life_items` 里挑 |
+| 技能/目标的进度 | `life_tree` 的 `progress` / `done_leaves` | 自己数完成了几个 |
+| 这周该回顾什么 | `review_queue` | 自己扫一遍所有条目 |
+| 提醒有没有用 | `intervention_outcomes` 的 `switch_rate` | 凭感觉下结论 |
+| 知识库哪里乱 | `kb_doctor` | 自己在上下文里统计图结构 |
 
 ## 意图路由（核心）
 
@@ -28,7 +44,8 @@ description: Sisyphus 项目专用的意图工程与 Core 状态同步入口。�
 |---|---|---|
 | 要记住的事实 / 一篇文章 / 链接 / 想法 | **笔记** | `capture` → `propose_intents(..., kind="note")`，保留来源和必要标签 → 复述确认 → `accept_intent`。不写 Obsidian 知识库。 |
 | 具体待办 / “提醒我 X” / 有时间点的事 | **任务 / 提醒** | `capture` → `propose_intents(capture_event_id, [{kind:"task"或"reminder", proposed:{…}}])` → 复述确认 → `accept_intent`。**提醒必须给 `remind_at_ms`（真实 epoch 毫秒）**，到点端侧自动弹通知。 |
-| 长期目标 / 项目 / 想发展的活动 / “放到主线或支线” | **LifeItem** | `capture` 保留原话 → 复述最小结构 → 确认后 `upsert_life_item`。kind/track/horizon 不确定就用 idea/undecided/unscheduled，不猜。 |
+| 长期目标 / 项目 / 想发展的活动 / “放到主线或支线” | **LifeItem** | `capture` 保留原话 → 复述最小结构 → 确认后 `upsert_life_item`（或走 `propose_intents(kind="life_item")` 保留可回滚）。kind/track/horizon 不确定就用 idea/undecided/unscheduled，不猜；能填 `area_id` 就填（`list_life_areas` 取）。 |
+| 想练成的能力 / “想学会 X” / 需要分阶段的长期投入 | **技能 + 里程碑** | `upsert_life_item(kind="skill")`，再用 `kind="milestone"` 拆 2–5 个**可判定**的阶段（每个给 `success_criteria`，能量化就给 `target_value`/`unit`），`link_life_items(relation="contains")` 挂上去；有前置能力用 `depends_on`。进度别自己估——`life_tree` 会算。 |
 | 想改的习惯 / “少刷 X” / “戒 X” / 今天要专注做的事 | **习惯 / 目标** | `set_goal(今日目标)`；若涉及沉迷某 app → `add_monitored_app(包名, "entertainment.video/game/social/news")` 纳入监控。之后用户设了目标又超时刷它，西西弗斯会在**端侧自动弹干预**。 |
 | “帮我盯着 X” / “我一到 X 就停不下来” / 想自定义触发条件（特定时段/阈值/分类） | **检测规则** | `create_detection_rule(name, trigger, response?)` 把口述落成声明式规则，命中即端侧自动干预。schema、response 策略与例子见 [references/rules.md](references/rules.md)。 |
 | 情绪 / 吐槽 / 只是想说说 | **情绪** | 只 `capture` + 共情一句；晚间复盘时引用，不强行落 artifact。 |
@@ -47,8 +64,9 @@ description: Sisyphus 项目专用的意图工程与 Core 状态同步入口。�
 
 ## 每日例程（模式）
 
-- **今日规划（morning-plan）**：`query_context` + `list_life_items` 看本地现状 → 结合 `list_captures` 里未处理的 → 提 **1 个**今日最小目标 → `set_goal`。普通规划模式只读 Notion。
-- **晚间复盘（evening-review）**：`query_context` 看目标进度、娱乐时长、干预次数 → 关心式总结（不羞辱）→ 引导用户口述遗留想法，逐条 `capture`（供明天引用）。
+- **今日规划（morning-plan）**：`query_context` + **`next_actions`**（确定性选出、每条带理由——直接引用它的理由，不要自己从列表里挑）→ 结合 `list_captures` 里未处理的 → 提 **1 个**今日最小目标 → `set_goal`。普通规划模式只读 Notion。
+- **晚间复盘（evening-review）**：`query_context` 看目标进度、娱乐时长、干预次数；**`intervention_outcomes` 看提醒后的真实转移率**（引用真实数字，不要凭感觉说"提醒有效"）→ 关心式总结（不羞辱）→ 引导用户口述遗留想法，逐条 `capture`。
+- **周回顾（weekly-review，周日）**：`review_queue` 拿 Core 算好的问题（到期审查的想法 / 停滞的目标 / 没拆解的目标 / 缺完成条件的目标 / 滞留 inbox 的想法）→ **只挑最重要的 1–2 条问**，每条给"升级 / someday / 归档"三选一。别一次抛十个问题。
 - **处理本地未分类记录**：`list_captures(unprocessed=true)` → 逐条走上面的意图路由。它不是 Notion Inbox；不要在 Notion 创建或维护 Inbox / NOW /“下一项”。
 
 主动推荐由定时器 / 行为规则拉起：`query_context` + LifeDB → 只返回 **1 条**适合当下的建议或 `no_recommendation` → 由宿主推给宠物 / 系统通知。主动推荐不得修改 Notion。

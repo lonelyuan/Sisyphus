@@ -3,10 +3,23 @@
 
 use crate::rule_engine::DailyGoal;
 use rusqlite::{params, Connection, Result};
+use std::time::Duration;
 
+/// 跨进程并发（App/collector/scheduler/mcp 同开一库）：WAL + busy_timeout 处理写争用，
+/// 而不是让并发写直接抛 SQLITE_BUSY 给调用方。
+///
+/// 打开顺序：`SCHEMA`（最新定义，新库一次建好）→ [`crate::migrations::run`]（把老库补齐）。
+///
+/// 两条必须守的规则：
+/// 1. **给已有表加列/改约束一律走 migrations**——`CREATE TABLE IF NOT EXISTS` 对已存在的表是空操作。
+/// 2. **SCHEMA 里不许对"迁移才加的列"建索引**。`execute_batch` 遇到失败语句会**中止整批**，
+///    于是它后面的所有建表语句都不会执行——老库会缺一堆表，而错误信息只提到那个索引。
+///    索引跟着加列的那条迁移一起建（已用真实库验证过这个坑）。
 pub fn open(path: &str) -> Result<Connection> {
     let conn = Connection::open(path)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
     conn.execute_batch(SCHEMA)?;
+    crate::migrations::run(&conn)?;
     Ok(conn)
 }
 
@@ -125,7 +138,12 @@ pub fn update_intervention_response(conn: &Connection, id: &str, action: &str) -
     Ok(())
 }
 
-/// 冷却检查：距上次触发同一规则是否已超过 cooldown_ms。
+/// 冷却检查：距上次**响应**同一规则是否已超过 cooldown_ms。
+///
+/// ⚠️ 读的是 `rule_fires`（"这条规则产生过响应"）而**不是** `interventions`（"通知真的弹了"）。
+/// 二者不同：`Deferred` / `Debounce` 策略在命中时只入队、并不立刻弹通知，若冷却按
+/// `interventions.shown_at` 判断，则冷却永远 ready，采集器每一拍（5–15s）都会重新入队一条
+/// —— 十分钟延迟的规则会攒出几十条通知同时炸出来。响应事实必须在**命中当拍**落库。
 pub fn is_cooldown_ready(
     conn: &Connection,
     rule_id: &str,
@@ -134,7 +152,7 @@ pub fn is_cooldown_ready(
 ) -> Result<bool> {
     let last: Option<i64> = conn
         .query_row(
-            "SELECT MAX(shown_at) FROM interventions WHERE rule_id = ?1",
+            "SELECT MAX(fired_at_ms) FROM rule_fires WHERE rule_id = ?1",
             params![rule_id],
             |r| r.get(0),
         )
@@ -143,6 +161,54 @@ pub fn is_cooldown_ready(
             other => Err(other),
         })?;
     Ok(last.map_or(true, |t| now_ms - t > cooldown_ms))
+}
+
+/// 记一条"规则已响应"事实（冷却与去重的唯一依据）。
+/// `policy` = immediate | deferred | debounce | suppress；`dedup_key` 供 debounce 窗口判断。
+pub fn record_rule_fire(
+    conn: &Connection,
+    rule_id: &str,
+    fired_at_ms: i64,
+    policy: &str,
+    dedup_key: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO rule_fires (rule_id, fired_at_ms, policy, dedup_key)
+         VALUES (?1,?2,?3,?4)",
+        params![rule_id, fired_at_ms, policy, dedup_key],
+    )?;
+    Ok(())
+}
+
+/// debounce 窗口：同 `dedup_key` 在 `window_ms` 内是否已响应过。
+pub fn debounced_recently(
+    conn: &Connection,
+    dedup_key: &str,
+    now_ms: i64,
+    window_ms: i64,
+) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM rule_fires WHERE dedup_key = ?1 AND fired_at_ms > ?2",
+        params![dedup_key, now_ms - window_ms.max(0)],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// 回填近端结果（干预后 N 分钟用户在干什么）。`outcome` 是归一化标签，`detail` 存实际分类/app。
+pub fn record_intervention_outcome(
+    conn: &Connection,
+    id: &str,
+    outcome: &str,
+    detail: Option<&str>,
+    observed_at_ms: i64,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE interventions SET outcome=?2, outcome_detail=?3, outcome_at_ms=?4
+         WHERE id=?1 AND outcome IS NULL",
+        params![id, outcome, detail, observed_at_ms],
+    )?;
+    Ok(())
 }
 
 /// 今日娱乐总时长（ms），含活跃会话。
@@ -159,23 +225,45 @@ pub fn today_intervention_count(conn: &Connection, date_start_ms: i64) -> Result
     )
 }
 
+/// 窗口 `[from, to)` 内的（娱乐时长, 全部前台观测时长），会话与窗口取交集。
+/// 近端结果观察用它算"提醒后这段时间里娱乐占比多少"。
+pub fn category_split_between(conn: &Connection, from_ms: i64, to_ms: i64) -> Result<(i64, i64)> {
+    conn.query_row(
+        "SELECT
+           COALESCE(SUM(CASE WHEN category LIKE 'entertainment%'
+                             THEN MAX(0, MIN(end_time, ?2) - MAX(start_time, ?1)) ELSE 0 END), 0),
+           COALESCE(SUM(MAX(0, MIN(end_time, ?2) - MAX(start_time, ?1))), 0)
+         FROM raw_events
+         WHERE layer='raw' AND type='app_foreground'
+           AND start_time IS NOT NULL AND end_time IS NOT NULL
+           AND start_time < ?2 AND end_time > ?1",
+        params![from_ms, to_ms],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+}
+
 /// 单设备内下一个 seq_no（单调递增，用于增量拉取与查漏）。
+///
+/// **不能用 `MAX(seq_no)+1`**：`raw_events` 上有 `UNIQUE(device_id, seq_no)`，而写入是
+/// `INSERT OR IGNORE` —— 两个同 device_id 的写入者并发算出同一个 seq_no 时，后一条会被
+/// 静默吞掉，函数却照样返回一个库里并不存在的 event_id（Pi 与 Codex 拉起的 MCP 都用
+/// `agent-mcp`，主对话与定时任务重叠时就会撞）。改用计数器表单语句原子自增。
 pub fn next_seq_no(conn: &Connection, device_id: &str) -> Result<i64> {
-    let max: Option<i64> = conn
-        .query_row(
-            "SELECT MAX(seq_no) FROM raw_events WHERE device_id = ?1",
-            params![device_id],
-            |r| r.get(0),
-        )
-        .or_else(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => Ok(None),
-            other => Err(other),
-        })?;
-    Ok(max.unwrap_or(0) + 1)
+    conn.query_row(
+        "INSERT INTO device_seq (device_id, next_seq)
+         VALUES (?1, (SELECT COALESCE(MAX(seq_no), 0) + 1 FROM raw_events WHERE device_id = ?1))
+         ON CONFLICT(device_id) DO UPDATE SET next_seq = next_seq + 1
+         RETURNING next_seq",
+        params![device_id],
+        |r| r.get(0),
+    )
 }
 
 /// 写入一条完整信封事件到 Event log（append-only，`event_id` 幂等）。
 /// 这是唯一写入路径 `ingest_event` 的底层实现（见 docs/spec/architecture.md §3）。
+///
+/// `INSERT OR IGNORE` 只应吞掉"同 event_id 重复提交"这一种情况。若没插进去且 event_id
+/// 也不在库里，说明撞的是别的唯一约束（如 seq_no）——那是**静默丢事件**，必须报错而不是假装成功。
 #[allow(clippy::too_many_arguments)]
 pub fn insert_behavior_event(
     conn: &Connection,
@@ -198,7 +286,7 @@ pub fn insert_behavior_event(
     produced_at: i64,
 ) -> Result<()> {
     let now_ms = chrono::Utc::now().timestamp_millis();
-    conn.execute(
+    let changed = conn.execute(
         "INSERT OR IGNORE INTO raw_events
          (event_id, user_id, device_id, seq_no, source, layer, type, time_mode,
           event_time, start_time, end_time, entity, category, payload_json,
@@ -225,6 +313,16 @@ pub fn insert_behavior_event(
             now_ms
         ],
     )?;
+    if changed == 0 {
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM raw_events WHERE event_id = ?1",
+            params![event_id],
+            |r| r.get(0),
+        )?;
+        if exists == 0 {
+            return Err(rusqlite::Error::StatementChangedRows(0));
+        }
+    }
     Ok(())
 }
 
@@ -248,6 +346,13 @@ pub fn enqueue_outbox(
 const SCHEMA: &str = r#"
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
+
+-- Core 行为开关的本地 KV（换日点、rollup 保留窗口…）。凭据/模型配置不进这里。
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
 
 -- 事件 outbox：采集后先写这里，批量上传到 Supabase 后标记 done。
 CREATE TABLE IF NOT EXISTS outbox (
@@ -289,6 +394,15 @@ CREATE INDEX IF NOT EXISTS idx_raw_timeline_time
     ON raw_events (COALESCE(start_time, event_time, produced_at));
 CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_device_seq
     ON raw_events (device_id, seq_no);
+CREATE INDEX IF NOT EXISTS idx_raw_type_time
+    ON raw_events (type, COALESCE(start_time, event_time, produced_at));
+CREATE INDEX IF NOT EXISTS idx_raw_ingested ON raw_events (ingested_at);
+
+-- 每设备 seq_no 计数器：单语句原子自增，避免并发 MAX+1 撞 UNIQUE 导致静默丢事件。
+CREATE TABLE IF NOT EXISTS device_seq (
+    device_id TEXT PRIMARY KEY,
+    next_seq  INTEGER NOT NULL
+);
 
 -- 今日目标。
 CREATE TABLE IF NOT EXISTS daily_goals (
@@ -300,7 +414,7 @@ CREATE TABLE IF NOT EXISTS daily_goals (
 );
 CREATE INDEX IF NOT EXISTS idx_goal_date ON daily_goals (date);
 
--- 干预记录。
+-- 干预记录。outcome_* 是近端结果观察（干预后 N 分钟用户在干什么）——1.1 唯一的学习信号。
 CREATE TABLE IF NOT EXISTS interventions (
     id              TEXT PRIMARY KEY,
     trigger_event_id TEXT,
@@ -311,9 +425,25 @@ CREATE TABLE IF NOT EXISTS interventions (
     options_json    TEXT NOT NULL,
     user_response   TEXT,
     responded_at    INTEGER,
-    outcome         TEXT
+    outcome         TEXT,
+    outcome_detail  TEXT,
+    outcome_at_ms   INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_interventions_shown ON interventions (shown_at);
+
+-- 规则响应事实（append-only）：命中当拍就写，**与"通知有没有真的弹"无关**。
+-- 冷却与 debounce 窗口只看这张表；否则 Deferred/Debounce 策略下冷却永远 ready，
+-- 采集器每拍都会重复入队（十分钟延迟 → 几十条通知同时炸）。
+CREATE TABLE IF NOT EXISTS rule_fires (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id     TEXT NOT NULL,
+    fired_at_ms INTEGER NOT NULL,
+    policy      TEXT NOT NULL,     -- immediate | deferred | debounce | suppress
+    dedup_key   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_rule_fires_rule ON rule_fires (rule_id, fired_at_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_rule_fires_dedup ON rule_fires (dedup_key, fired_at_ms DESC);
+
 
 -- ── 反思平面 Artifact store（Phase 1.2：原声笔记）────────────────────────────
 -- 铁律：每种有状态对象各自建表，禁止多态大表。intent_candidates 是 capture→artifact
@@ -375,18 +505,36 @@ CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders (status, remind_at_ms)
 
 -- ── 第二大脑知识索引（Phase 1.3）─────────────────────────────────────────────
 -- 可读知识本体是 Obsidian vault 的 .md（投影）；本表是可查询真相 + 溯源指针。
+-- `body` 进索引是为了**查重能搜正文**——只按标题查重是碎片化的机械原因。
+-- `title` 存活行唯一（部分唯一索引）：一个概念一张卡，其余走 aliases 重定向。
 CREATE TABLE IF NOT EXISTS knowledge_notes (
     id           TEXT PRIMARY KEY,
-    path         TEXT NOT NULL UNIQUE,          -- vault 内相对路径，如 "ai-security.md"
+    path         TEXT NOT NULL UNIQUE,          -- vault 内相对路径，如 "kb/web-security/sql-注入.md"
+    folder       TEXT NOT NULL DEFAULT '',      -- 话题领域（= 博客栏目），一律以 kb/ 开头
     title        TEXT NOT NULL,
+    body         TEXT NOT NULL DEFAULT '',      -- 正文（供正文查重；vault 的 .md 才是本体）
     tags_json    TEXT NOT NULL DEFAULT '[]',
     sources_json TEXT NOT NULL DEFAULT '[]',
+    aliases_json TEXT NOT NULL DEFAULT '[]',    -- 重定向：旧标题 → 本卡
     content_hash TEXT NOT NULL,
     status       TEXT NOT NULL DEFAULT 'active', -- active|stale|duplicate|pruned
     created_at   INTEGER NOT NULL,
     updated_at   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_status ON knowledge_notes (status);
+-- idx_knowledge_folder / idx_knowledge_title_unique 在 migrations 里建（依赖迁移才加的列）。
+
+-- 卡片间的 wikilink 边（从正文解析出来，写入时重建）。
+-- 未解析的目标就是**红链**：被引用但还不存在 = 知识缺口 = 主动调研队列的输入。
+CREATE TABLE IF NOT EXISTS knowledge_links (
+    from_path   TEXT NOT NULL,
+    to_title    TEXT NOT NULL,
+    resolved    INTEGER NOT NULL DEFAULT 0,
+    updated_at  INTEGER NOT NULL,
+    PRIMARY KEY (from_path, to_title)
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_links_to ON knowledge_links (to_title, resolved);
+
 
 -- 用户可编辑的监控名单（哪些 app 算娱乐）。分类判定：此表 > 内置白名单。
 -- 桌面采集器与 Android JNI 都读它，故加/删一个 app 跨端立即生效、无需重编。
@@ -454,9 +602,26 @@ CREATE INDEX IF NOT EXISTS idx_lifeindex_status ON lifeindex_cards (status, sect
 -- ── LifeDB：LifeIndex 的结构化事实来源 ───────────────────────────────────────
 -- LifeItem 是人生规划领域内的统一对象，不是兜住所有业务的多态 artifact：
 -- note / reminder / intervention 等仍保留独立表。Notion 只通过受控同步器交换表面文本。
+--
+-- 责任领域（GTD Horizon 3）：无完成态，只需维持标准。有了它，track（主线/支线）可由
+-- "该领域当前是否重点"推导，而不是每条手标——这是"手动维护不丝滑"的主要来源。
+CREATE TABLE IF NOT EXISTS life_areas (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    sort_order  INTEGER NOT NULL DEFAULT 0,
+    focus       INTEGER NOT NULL DEFAULT 0,   -- 1 = 当前重点领域（→ track=main 的推导依据）
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
+
+-- kind 里 skill / milestone 是**技能树的底座**：
+--   skill      一个能力节点；前置关系用 depends_on 边，层级/等级用 contains 边挂 milestone
+--   milestone  可判定的检查点（目标自动拆解的产物），也是无极时间线上的抽象层标记
+-- target_value/current_value/unit + success_criteria 让"完成"可判定，进度由 Core 确定性算出。
 CREATE TABLE IF NOT EXISTS life_items (
     id              TEXT PRIMARY KEY,
-    kind            TEXT NOT NULL CHECK (kind IN ('idea','goal','project','action','routine')),
+    kind            TEXT NOT NULL CHECK (kind IN ('idea','goal','project','action','routine','skill','milestone')),
     title           TEXT NOT NULL,
     body            TEXT NOT NULL DEFAULT '',
     track           TEXT NOT NULL DEFAULT 'undecided'
@@ -465,6 +630,11 @@ CREATE TABLE IF NOT EXISTS life_items (
                     CHECK (horizon IN ('now','next','later','someday','unscheduled')),
     status          TEXT NOT NULL DEFAULT 'inbox'
                     CHECK (status IN ('inbox','active','waiting','done','archived')),
+    area_id         TEXT,
+    success_criteria TEXT,
+    target_value    REAL,
+    current_value   REAL,
+    unit            TEXT,
     start_at_ms     INTEGER,
     due_at_ms       INTEGER,
     review_at_ms    INTEGER,
@@ -482,6 +652,11 @@ CREATE INDEX IF NOT EXISTS idx_life_items_view
     ON life_items (status, kind, track, horizon, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_life_items_sync
     ON life_items (sync_status, updated_at DESC);
+-- idx_life_items_area 在 migrations 里建（area_id 是迁移才加的列）。
+CREATE INDEX IF NOT EXISTS idx_life_items_span
+    ON life_items (COALESCE(start_at_ms, created_at), COALESCE(due_at_ms, start_at_ms, created_at));
+CREATE INDEX IF NOT EXISTS idx_life_items_review ON life_items (review_at_ms) WHERE review_at_ms IS NOT NULL;
+
 
 -- 邻接表就是 LifeDB 的图结构；SQLite recursive CTE 足够查询目标→项目→行动/日常。
 CREATE TABLE IF NOT EXISTS life_item_edges (
@@ -538,31 +713,28 @@ CREATE TABLE IF NOT EXISTS life_sync_runs (
 CREATE INDEX IF NOT EXISTS idx_life_sync_runs_target
     ON life_sync_runs (provider, target_id, completed_at_ms DESC);
 
--- 兼容迁移：现有任务进入 action；旧 LifeIndex 卡片只迁一次，保留来源文本。
-INSERT OR IGNORE INTO life_items
-    (id,kind,title,body,track,horizon,status,due_at_ms,source_event_id,intent_id,
-     sync_status,revision,created_at,updated_at,archived_at)
-SELECT id,'action',title,COALESCE(note,''),'undecided',
-       CASE WHEN due_ms IS NULL THEN 'unscheduled' ELSE 'next' END,
-       CASE status WHEN 'todo' THEN 'inbox' WHEN 'doing' THEN 'active'
-                   WHEN 'done' THEN 'done' ELSE 'archived' END,
-       due_ms,source_event_id,intent_id,'local_dirty',1,created_at,created_at,
-       CASE WHEN status='dropped' THEN created_at ELSE NULL END
-FROM tasks;
+-- ── 无极时间线：预聚合桶 ─────────────────────────────────────────────────────
+-- 为什么必须预聚合：年尺度下按 raw_events 现算 GROUP BY strftime 是全表扫描且用不上索引。
+-- 时间线的代价必须是 O(可见桶数) 而不是 O(事件数)，缩放才可能"无极"。
+-- 桶按**逻辑日**（本地时区 + 换日点）切；周/月桶由日桶再聚合。
+CREATE TABLE IF NOT EXISTS time_rollups (
+    bucket_kind     TEXT NOT NULL,               -- day | week | month
+    bucket_start_ms INTEGER NOT NULL,
+    dimension       TEXT NOT NULL,               -- category | app
+    key             TEXT NOT NULL,               -- 'entertainment.video' / bundle id / '(unknown)'
+    duration_ms     INTEGER NOT NULL DEFAULT 0,
+    event_count     INTEGER NOT NULL DEFAULT 0,
+    updated_at_ms   INTEGER NOT NULL,
+    PRIMARY KEY (bucket_kind, bucket_start_ms, dimension, key)
+);
+CREATE INDEX IF NOT EXISTS idx_rollups_scan
+    ON time_rollups (bucket_kind, dimension, bucket_start_ms);
 
-INSERT OR IGNORE INTO life_items
-    (id,kind,title,body,track,horizon,status,sync_status,revision,created_at,updated_at,archived_at)
-SELECT id,
-       CASE WHEN section LIKE '%日常%' THEN 'routine'
-            WHEN section LIKE '%目标%' THEN 'goal'
-            WHEN section LIKE '%事项%' OR section LIKE '%焦点%' THEN 'action'
-            ELSE 'idea' END,
-       title,body,
-       CASE WHEN section LIKE '%主线%' THEN 'main'
-            WHEN section LIKE '%支线%' THEN 'side' ELSE 'undecided' END,
-       'unscheduled',
-       CASE status WHEN 'archived' THEN 'archived' ELSE 'active' END,
-       'local_dirty',1,created_at,updated_at,
-       CASE WHEN status='archived' THEN updated_at ELSE NULL END
-FROM lifeindex_cards;
+-- 增量重建水位：只重算水位之后新事件所触碰到的桶（重算是幂等的删+插）。
+CREATE TABLE IF NOT EXISTS rollup_state (
+    scope         TEXT PRIMARY KEY,              -- 'behavior'
+    watermark_ms  INTEGER NOT NULL,              -- 已处理到的 ingested_at
+    updated_at_ms INTEGER NOT NULL
+);
 "#;
+

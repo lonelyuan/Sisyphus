@@ -9,7 +9,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use rmcp::{
     handler::server::router::tool::ToolRouter,
@@ -97,24 +96,112 @@ pub struct WriteKnowledgeNoteReq {
     /// 关联的其它知识卡片标题（渲染为 Obsidian [[wikilink]]）
     #[serde(default)]
     pub links: Vec<String>,
-    /// 来源 url / 引用
+    /// 来源 url / 引用（外部原文路径 / 权威 URL）。可靠性标为「多源印证/已复现/已验证」时必填
     #[serde(default)]
     pub sources: Vec<String>,
-    /// 可选分类子目录（话题领域），如 "web-security" 或 "work-mihoyo/state"；省略=vault 根。卡片落到 {folder}/{标题}.md
+    /// 话题领域目录，**必须以 `kb/` 开头**，如 "kb/web-security" / "kb/work-mihoyo/state"
+    pub folder: String,
+    /// 别名（重定向）：指向本卡的旧标题；合并碎卡后旧 [[链接]] 仍可解析
     #[serde(default)]
-    pub folder: Option<String>,
+    pub aliases: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReadKnowledgeNoteReq {
+    /// 卡片标题（支持别名/重定向）
+    pub title: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AppendSectionReq {
+    /// 要长大的那颗结晶的标题
+    pub title: String,
+    /// H2 小节名（同名则替换=精化，不同名则插入=增生）
+    pub heading: String,
+    /// 该小节的正文
+    pub body: String,
+    /// 追加的关联卡片标题
+    #[serde(default)]
+    pub links: Vec<String>,
+    /// 追加的来源
+    #[serde(default)]
+    pub sources: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct MergeNotesReq {
+    /// 要并掉的碎卡标题（会登记为目标卡别名，入链自动改写）
+    pub from_titles: Vec<String>,
+    /// 合并进哪颗结晶（先用 append_knowledge_section 把内容写成超集，再调本工具）
+    pub into_title: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct WantedReq {
+    /// 至少被引用几次才算值得补（默认 1）
+    #[serde(default)]
+    pub min_refs: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct LifeTreeReq {
+    /// 只看这些 kind 的根节点，如 ["skill"] 看技能树、["goal"] 看目标分解；省略=全部
+    #[serde(default)]
+    pub kinds: Vec<String>,
+    /// 只看某个节点的子树（传 LifeItem id）
+    #[serde(default)]
+    pub root_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpsertLifeAreaReq {
+    /// 领域名（按名字幂等）
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// 是否当前重点领域（影响主线推导与今日行动选择）
+    #[serde(default)]
+    pub focus: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct LimitReq {
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReviewQueueReq {
+    /// 多少天没动算"停滞"（默认 7）
+    #[serde(default)]
+    pub idle_days: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SinceDaysReq {
+    /// 统计最近多少天（默认 30）
+    #[serde(default)]
+    pub since_days: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SyncRunReq {
+    /// life_sync_runs 的轮次 id（list_lifeindex_runs 取）
+    pub run_id: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SaveSourceReq {
+    /// 话题领域目录，**必须以 `kb/` 开头**——原文就地存放在它讲的那个话题旁边
+    pub folder: String,
     /// 原文标题（决定文件名）
     pub title: String,
     /// 逐字原文内容（Markdown / 纯文本）
     pub content: String,
-    /// 来源 URL（可选）
+    /// 来源 URL。外部原文**必填**（否则无法溯源）；本人自撰材料请把 source_type 设为 first-party
     #[serde(default)]
     pub url: Option<String>,
-    /// 素材类型（可选），如 article / vuln-report / doc / paper
+    /// 素材类型：article / vuln-report / doc / paper / first-party（本人自撰）
     #[serde(default)]
     pub source_type: Option<String>,
 }
@@ -228,7 +315,8 @@ pub struct UpsertLifeItemReq {
     /// 更新已有项时建议回传 list_life_items 返回的 revision；不一致会拒绝覆盖并要求重新合并。
     #[serde(default)]
     pub expected_revision: Option<i64>,
-    /// idea | goal | project | action | routine
+    /// idea | goal | project | action | routine | skill | milestone
+    /// （skill = 能力节点，用 depends_on 边表达前置；milestone = 可判定的检查点）
     pub kind: String,
     pub title: String,
     #[serde(default)]
@@ -242,10 +330,24 @@ pub struct UpsertLifeItemReq {
     /// inbox | active | waiting | done | archived
     #[serde(default)]
     pub status: Option<String>,
+    /// 责任领域 id（list_life_areas 取）。不确定就留空，别猜。
+    #[serde(default)]
+    pub area_id: Option<String>,
+    /// 可判定的完成条件（一句话）。goal / milestone 强烈建议填——没有它目标永远无法收敛。
+    #[serde(default)]
+    pub success_criteria: Option<String>,
+    /// 度量目标值 / 当前值 / 单位（技能树进度由 Core 用它确定性算出）。
+    #[serde(default)]
+    pub target_value: Option<f64>,
+    #[serde(default)]
+    pub current_value: Option<f64>,
+    #[serde(default)]
+    pub unit: Option<String>,
     #[serde(default)]
     pub start_at_ms: Option<i64>,
     #[serde(default)]
     pub due_at_ms: Option<i64>,
+    /// 审查时间（epoch ms）。idea 建议排 +7 天，到期由周回顾提出"升级/someday/归档"三选一。
     #[serde(default)]
     pub review_at_ms: Option<i64>,
     /// RFC 5545 RRULE 或人类可读周期；未知则留空，不猜。
@@ -465,6 +567,7 @@ impl SisyphusServer {
             links,
             sources,
             folder,
+            aliases,
         }): Parameters<WriteKnowledgeNoteReq>,
     ) -> Result<String, String> {
         self.ensure_writable()?;
@@ -475,24 +578,26 @@ impl SisyphusServer {
             tags,
             links,
             sources,
+            aliases,
         };
         let out = sisyphus_core::knowledge::write_knowledge_note(
             &conn,
             &self.vault_dir,
             &self.user_id,
             &self.device_id,
-            folder.as_deref(),
+            Some(&folder),
             &note,
         )?;
         serde_json::to_string(&out).map_err(|e| format!("序列化失败: {e}"))
     }
 
     #[tool(
-        description = "把值得原文保存的素材逐字归档到原始材料库 sources/（与知识图谱 kb/ 物理隔离，不进图谱、不导出博客）。返回 JSON {path,content_hash,updated}。加工总结请另用 write_knowledge_note 写 kb 卡片，并在其 sources 里引用本原文路径。"
+        description = "把值得原文保存的素材逐字归档，**就地存放在它讲的那个话题的文件夹里**（folder 必须 kb/ 开头）。自动标 type:source + publish:false（不外发），在图谱里是**叶子**（只被卡片/枢纽指向、自己不出链）。外部原文必须给 url；本人自撰传 source_type=\"first-party\"。⚠️ 公司 KM 这类你能直接开链接的第一方文档**不要逐字复制**——在卡片正文里引用 URL 就够，副本只会制造双份真相。返回 JSON {path,content_hash,updated}。"
     )]
     fn save_source(
         &self,
         Parameters(SaveSourceReq {
+            folder,
             title,
             content,
             url,
@@ -506,6 +611,7 @@ impl SisyphusServer {
             &self.vault_dir,
             &self.user_id,
             &self.device_id,
+            &folder,
             &title,
             &content,
             url.as_deref(),
@@ -530,6 +636,121 @@ impl SisyphusServer {
         let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
         let v = sisyphus_core::knowledge::list_knowledge(&conn).map_err(|e| e.to_string())?;
         serde_json::to_string_pretty(&v).map_err(|e| format!("序列化失败: {e}"))
+    }
+
+    #[tool(
+        description = "读回一张知识卡片的完整内容（frontmatter + 正文小节 + 关联）。**补充式增长前必须先读回**；支持别名。返回 JSON {path,title,tags,sources,aliases,body,links}。"
+    )]
+    fn read_knowledge_note(
+        &self,
+        Parameters(ReadKnowledgeNoteReq { title }): Parameters<ReadKnowledgeNoteReq>,
+    ) -> Result<String, String> {
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let (path, note) =
+            sisyphus_core::knowledge::read_knowledge_note(&conn, &self.vault_dir, &title)?;
+        serde_json::to_string_pretty(&serde_json::json!({
+            "path": path,
+            "title": note.title,
+            "tags": note.tags,
+            "sources": note.sources,
+            "aliases": note.aliases,
+            "body": note.body,
+            "links": note.links,
+        }))
+        .map_err(|e| format!("序列化失败: {e}"))
+    }
+
+    #[tool(
+        description = "给已有结晶加/精**一个 H2 小节**并写回超集（结晶化的默认路径）。同名小节=精化，新名=增生；其余小节原样保留。同主题多轮对话请用它，别每次新建碎卡。返回 JSON {id,path,updated,wanted_links}。"
+    )]
+    fn append_knowledge_section(
+        &self,
+        Parameters(AppendSectionReq {
+            title,
+            heading,
+            body,
+            links,
+            sources,
+        }): Parameters<AppendSectionReq>,
+    ) -> Result<String, String> {
+        self.ensure_writable()?;
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let out = sisyphus_core::knowledge::append_section(
+            &conn,
+            &self.vault_dir,
+            &self.user_id,
+            &self.device_id,
+            &title,
+            &heading,
+            &body,
+            &links,
+            &sources,
+        )?;
+        serde_json::to_string(&out).map_err(|e| format!("序列化失败: {e}"))
+    }
+
+    #[tool(
+        description = "结晶化归并：把若干碎卡并进一颗结晶。会①给目标卡登记别名（旧 [[链接]] 仍可解析）②改写其它卡里的入链 ③删掉碎卡——**不留断链**。正文超集请先用 append_knowledge_section 写好。返回 JSON {into_title,merged,rewritten_files}。"
+    )]
+    fn merge_knowledge_notes(
+        &self,
+        Parameters(MergeNotesReq {
+            from_titles,
+            into_title,
+        }): Parameters<MergeNotesReq>,
+    ) -> Result<String, String> {
+        self.ensure_writable()?;
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let out = sisyphus_core::knowledge::merge_notes(
+            &conn,
+            &self.vault_dir,
+            &self.user_id,
+            &self.device_id,
+            &from_titles,
+            &into_title,
+        )?;
+        serde_json::to_string(&out).map_err(|e| format!("序列化失败: {e}"))
+    }
+
+    #[tool(
+        description = "知识库体检：断链/断链率、孤儿卡（入度0）、无出链、同标题或同文件名重复、缺类型或可靠性标签、无证据的高可靠性、各领域卡数与拆并建议、同前缀碎卡簇、MOC 目录漂移、散落文件、未被引用的 sources 原文。**rebalance / defragment 前先跑它**，别靠感觉扫。返回结构化 JSON。"
+    )]
+    fn kb_doctor(&self) -> Result<String, String> {
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let report = sisyphus_core::kb_doctor::doctor(&conn, Some(&self.vault_dir))?;
+        serde_json::to_string_pretty(&report).map_err(|e| format!("序列化失败: {e}"))
+    }
+
+    #[tool(
+        description = "红链队列：被引用但还不存在的卡，按引用热度排序。**这是主动调研的输入**——不用等用户开口说“帮我深挖 X”，被引用最多的缺口就是最该补的。返回 JSON [{title,referenced_by,sources}]。"
+    )]
+    fn kb_wanted(
+        &self,
+        Parameters(WantedReq { min_refs }): Parameters<WantedReq>,
+    ) -> Result<String, String> {
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let v = sisyphus_core::kb_doctor::wanted(&conn, min_refs.unwrap_or(1).max(1) as usize)?;
+        serde_json::to_string_pretty(&v).map_err(|e| format!("序列化失败: {e}"))
+    }
+
+    #[tool(
+        description = "刷新所有领域枢纽（MOC）的自动目录区块：上级枢纽 + 子领域 + 卡片清单 + 原始材料清单。**写完新卡后调它**：手写目录必然漂移，而「枢纽真的连着它下面的卡片」是 Obsidian 图谱里出现树状层级的唯一机制。只替换 `<!-- kb:auto begin/end -->` 之间的内容，你写的领域叙述原样保留。返回 JSON {refreshed,cards_listed,sources_listed,skipped_missing}。"
+    )]
+    fn refresh_mocs(&self) -> Result<String, String> {
+        self.ensure_writable()?;
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let report = sisyphus_core::knowledge::refresh_mocs(&conn, &self.vault_dir)?;
+        serde_json::to_string(&report).map_err(|e| format!("序列化失败: {e}"))
+    }
+
+    #[tool(
+        description = "按 vault 现状重建索引与链接边（用户在 Obsidian 里手改/移动/删除过文件后调用；老库回填正文与领域也用它）。vault 的 .md 是本体，索引是可重建的投影。返回 JSON {scanned,inserted,updated,links}。"
+    )]
+    fn kb_reindex(&self) -> Result<String, String> {
+        self.ensure_writable()?;
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let report = sisyphus_core::knowledge::reindex_vault(&conn, &self.vault_dir)?;
+        serde_json::to_string(&report).map_err(|e| format!("序列化失败: {e}"))
     }
 
     #[tool(
@@ -704,6 +925,11 @@ impl SisyphusServer {
                 track: req.track.unwrap_or_else(|| "undecided".to_string()),
                 horizon: req.horizon.unwrap_or_else(|| "unscheduled".to_string()),
                 status: req.status.unwrap_or_else(|| "inbox".to_string()),
+                area_id: req.area_id,
+                success_criteria: req.success_criteria,
+                target_value: req.target_value,
+                current_value: req.current_value,
+                unit: req.unit,
                 start_at_ms: req.start_at_ms,
                 due_at_ms: req.due_at_ms,
                 review_at_ms: req.review_at_ms,
@@ -759,9 +985,87 @@ impl SisyphusServer {
         Ok("linked".to_string())
     }
 
-    #[tool(description = "列出 LifeItem 的全部结构关系，供 Agent 理解目标→项目→行动/日常层级。")]
-    fn list_life_item_edges(&self) -> Result<String, String> {
+    #[tool(
+        description = "技能树 / 目标分解树：返回根节点及其子树，含 **Core 确定性算出的进度**（叶子看状态或 current/target 度量，内部节点是子节点等权平均）、已完成叶子数、前置节点（depends_on）。kinds=[\"skill\"] 看技能树，[\"goal\"] 看目标分解，root_id 只看一根分支。进度不要自己估——用这里的数。"
+    )]
+    fn life_tree(
+        &self,
+        Parameters(LifeTreeReq { kinds, root_id }): Parameters<LifeTreeReq>,
+    ) -> Result<String, String> {
         let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        if let Some(root) = root_id.as_deref().filter(|r| !r.trim().is_empty()) {
+            let node = sisyphus_core::lifetree::subtree(&conn, root)?;
+            return serde_json::to_string_pretty(&node).map_err(|e| format!("序列化失败: {e}"));
+        }
+        let refs: Vec<&str> = kinds.iter().map(|k| k.as_str()).collect();
+        let forest = sisyphus_core::lifetree::forest(&conn, &refs)?;
+        serde_json::to_string_pretty(&forest).map_err(|e| format!("序列化失败: {e}"))
+    }
+
+    #[tool(
+        description = "今日最小行动（确定性选择 + **每条带理由**）：逾期 → 已排在当下 → 临近截止 → 主线/重点领域下最浅的未完成事项 → 今日日常 → 候选下一步 → 待安排。规划时用它，别自己从列表里挑。返回 JSON [{item_id,title,kind,track,due_at_ms,reason}]。"
+    )]
+    fn next_actions(
+        &self,
+        Parameters(LimitReq { limit }): Parameters<LimitReq>,
+    ) -> Result<String, String> {
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let v = sisyphus_core::lifetree::next_actions(&conn, limit.unwrap_or(3).clamp(1, 10) as usize)?;
+        serde_json::to_string_pretty(&v).map_err(|e| format!("序列化失败: {e}"))
+    }
+
+    #[tool(
+        description = "周回顾队列（GTD weekly review 的确定性部分）：到期该审查的想法、有子项但长期没推进的目标、完全没拆解的目标/技能、缺可判定完成条件的目标、长期滞留 inbox 的想法。每条自带该问用户的问题——让“手动维护”变成“回答几个二选一”。"
+    )]
+    fn review_queue(
+        &self,
+        Parameters(ReviewQueueReq { idle_days }): Parameters<ReviewQueueReq>,
+    ) -> Result<String, String> {
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let q = sisyphus_core::lifetree::review_queue(&conn, idle_days.unwrap_or(7))?;
+        serde_json::to_string_pretty(&q).map_err(|e| format!("序列化失败: {e}"))
+    }
+
+    #[tool(
+        description = "列出责任领域（GTD Horizon 3：无完成态，只需维持标准）。focus=true 的是当前重点，会影响主线推导与今日行动选择。写 LifeItem 时用它的 id 填 area_id。"
+    )]
+    fn list_life_areas(&self) -> Result<String, String> {
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let v = sisyphus_core::lifedb::list_areas(&conn)?;
+        serde_json::to_string_pretty(&v).map_err(|e| format!("序列化失败: {e}"))
+    }
+
+    #[tool(description = "新建/更新一个责任领域（按名字幂等），可设为当前重点。")]
+    fn upsert_life_area(
+        &self,
+        Parameters(UpsertLifeAreaReq {
+            name,
+            description,
+            focus,
+        }): Parameters<UpsertLifeAreaReq>,
+    ) -> Result<String, String> {
+        self.ensure_lifeindex_writable()?;
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let id = sisyphus_core::lifedb::upsert_area(&conn, &name, description.as_deref(), focus)?;
+        Ok(format!("area: {id}"))
+    }
+
+    #[tool(
+        description = "干预效果统计（提醒后的近端结果）：switched=转走了 / mixed=混合 / still_entertainment=还在刷 / unknown=没观测到，以及 switch_rate 转移率。这是判断“提醒到底有没有用”的唯一数据依据，复盘时引用真实数字而不是感觉。"
+    )]
+    fn intervention_outcomes(
+        &self,
+        Parameters(SinceDaysReq { since_days }): Parameters<SinceDaysReq>,
+    ) -> Result<String, String> {
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let since = sisyphus_core::clock::now_ms() - since_days.unwrap_or(30).max(1) * 86_400_000;
+        let stats = sisyphus_core::intervention::outcome_stats(&conn, since)
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string_pretty(&stats).map_err(|e| format!("序列化失败: {e}"))
+    }
+
+    #[tool(description = "列出 LifeItem 的全部结构关系，供 Agent 理解目标→项目→行动/日常层级。")]
+    fn list_life_item_edges(&self) -> Result<String, String> {        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
         let v = sisyphus_core::lifedb::list_edges(&conn)?;
         serde_json::to_string_pretty(&v).map_err(|e| format!("序列化失败: {e}"))
     }
@@ -843,6 +1147,32 @@ impl SisyphusServer {
         Ok(format!("lifeindex card: {id}"))
     }
 
+    #[tool(
+        description = "列出历史 LifeIndex 同步轮次（每轮都存了写回前全文）。整页替换是这条链路上唯一不可逆的一步，出问题时先用它找到要恢复的那一轮。返回 JSON [{id,summary,completed_at_ms,...预览}]。"
+    )]
+    fn list_lifeindex_runs(
+        &self,
+        Parameters(LimitReq { limit }): Parameters<LimitReq>,
+    ) -> Result<String, String> {
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        let target = match sisyphus_core::lifedb::list_sync_runs(&conn, &self.notion_target(), limit.unwrap_or(10)) {
+            Ok(v) => v,
+            Err(e) => return Err(e),
+        };
+        serde_json::to_string_pretty(&target).map_err(|e| format!("序列化失败: {e}"))
+    }
+
+    #[tool(
+        description = "取某一轮同步的**写回前完整文本**，用于把 Notion 页恢复成同步前的样子（LifeIndexSync 模式下把它交给 replace_lifeindex_page）。只读，不自己动 Notion。"
+    )]
+    fn lifeindex_rollback_text(
+        &self,
+        Parameters(SyncRunReq { run_id }): Parameters<SyncRunReq>,
+    ) -> Result<String, String> {
+        let conn = self.db.lock().map_err(|_| "db 锁中毒".to_string())?;
+        sisyphus_core::lifedb::sync_run_remote_before(&conn, &run_id)
+    }
+
     #[tool(description = "删除人生看板的一张卡片。")]
     fn delete_lifeindex_card(
         &self,
@@ -866,14 +1196,25 @@ impl ServerHandler for SisyphusServer {
                 ..Default::default()
             },
             instructions: Some(
-                "Sisyphus 反思平面。原声笔记闭环：capture 记录一句话 → list_captures 看收件箱 → \
-                 propose_intents 对一条 capture 生成意图候选（你负责分类为 goal/task/reminder/note）→ \
-                 accept_intent 落成 artifact（或 ignore_intent 忽略）。query_context 查今日上下文（目标/娱乐时长/未完成任务/到期提醒）；\
-                 today_actions 取今日最小行动；set_goal 设今日目标。\
-                 第二大脑：ingest_document 收素材 → 你阅读加工 → write_knowledge_note 写概念卡片到 Obsidian 知识库（[[wikilink]] 关联）；search_knowledge/list_knowledge 检索；delete_note 删卡（合并碎卡后清冗余）。\
-                 西西弗斯计划（拖延干预）：add_monitored_app 把某娱乐 app 纳入监控 + set_goal 设目标，用户超时刷它时端侧自动弹干预；list_monitored_apps 查名单。\
-                 想“盯住某类行为/新场景”时用 create_detection_rule 把用户口述落成检测规则（声明式 trigger + response），list/set_enabled/delete_detection_rule 管理。\
-                 LifeIndex：LifeDB 是事实源；list/upsert_life_item 管理 idea/goal/project/action/routine，link_life_items 建关系；Notion 双向同步必须走受限 LifeIndexSync，三方合并后成功写回才 complete_lifeindex_sync。\
+                "Sisyphus 反思平面。\n\
+                 【意图工程】任意用户输入先 capture → list_captures 看收件箱 → propose_intents 生成候选\
+                 （kind: goal|task|reminder|note|life_item|rule，你负责分类）→ accept_intent 落库 / ignore_intent 忽略。\
+                 落库前复述确认；note/idea 可直接落，task/reminder 复述一句，goal/规则/监控名单必须确认。\n\
+                 【今日】query_context 查上下文；next_actions 取确定性选出的最小行动（**每条带理由，别自己从列表里挑**）；set_goal 设今日目标。\n\
+                 【人生看板 LifeDB】list/upsert_life_item 管 idea/goal/project/action/routine/skill/milestone；\
+                 link_life_items 建关系（contains=分解，depends_on=前置）；list_life_areas 取责任领域填 area_id；\
+                 life_tree 看技能树/目标分解**及 Core 算好的进度（不要自己估）**；review_queue 拿周回顾要问的问题。\
+                 goal/milestone 尽量给 success_criteria，否则永远无法收敛。Notion 双向同步只走受限 LifeIndexSync 模式；\
+                 出问题用 list_lifeindex_runs + lifeindex_rollback_text 找回写前全文。\n\
+                 【第二大脑】写卡前先 search_knowledge（**含正文**）查重：\
+                 已有结晶就 append_knowledge_section 长一个 H2 小节（默认路径）；\
+                 确实是新主题 → write_knowledge_note（folder 必须以 kb/ 开头，tags 恰好一个类型 + 一个可靠性档，\
+                 links 至少一条；已复现/已验证必须有 sources）。整卡覆盖前先 read_knowledge_note 读回。\
+                 碎卡合并用 merge_knowledge_notes（自动留别名、改入链、不留断链），删单卡用 delete_note。\
+                 整理知识库先跑 kb_doctor（断链/孤儿/重复/缺标签/超阈值目录/碎卡簇/目录漂移），别靠感觉扫；\
+                 kb_wanted 是红链队列 = 主动调研的输入；用户在 Obsidian 手改过就 kb_reindex。\n\
+                 【反拖延】add_monitored_app + set_goal 即启用端侧自动干预；create_detection_rule 把「帮我盯着某类行为」落成声明式规则；\
+                 intervention_outcomes 看提醒后的真实转移率——复盘引用它，不要凭感觉说有效。\n\
                  语气：关心不评判、只提最小下一步、引用真实数据。"
                     .to_string(),
             ),
@@ -883,6 +1224,14 @@ impl ServerHandler for SisyphusServer {
 }
 
 impl SisyphusServer {
+    /// 同步目标页 id（与宿主一致：从 notion_config.json 读；缺省空串表示未配置）。
+    fn notion_target(&self) -> String {
+        let dir = dirs::data_dir()
+            .map(|d| d.join("com.sisyphus"))
+            .unwrap_or_default();
+        sisyphus_core::app_config::read_notion_config(&dir).page_id
+    }
+
     fn ensure_writable(&self) -> Result<(), String> {
         if self.read_only || self.lifeindex_only {
             Err("当前 Sisyphus MCP 以只读模式运行；智能体不能修改用户内容或本地状态".to_string())
@@ -910,9 +1259,6 @@ impl SisyphusServer {
             .ok_or_else(|| anyhow::anyhow!("db path not utf-8: {:?}", path))?;
         let conn = sisyphus_core::db::open(path_str)
             .map_err(|e| anyhow::anyhow!("open db {path_str}: {e}"))?;
-        // 跨进程并发：与 Tauri App 同开一库，WAL + busy_timeout 处理写争用。
-        conn.busy_timeout(Duration::from_secs(5))
-            .map_err(|e| anyhow::anyhow!("busy_timeout: {e}"))?;
         let env_flag = |k: &str| {
             std::env::var(k)
                 .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))

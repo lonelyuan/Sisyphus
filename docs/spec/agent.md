@@ -34,7 +34,7 @@
 |---|---|---|---|
 | **Interactive** | 主对话 / 宠物（用户主动） | 可写（经用户确认可 set_goal / 建规则 / 写知识 / 落任务等） | 只读 |
 | **Proactive** | 定时 / 规则触发的推荐 | 只读 | 只读 |
-| **LifeIndex** | 每日看板刷新 | 仅看板卡片（`upsert_lifeindex_card`），其它写禁用 | 只读 |
+| **LifeIndexSync** | 每日 08:30 / 本地修改触发的双向同步 | 仅 LifeDB（`upsert_life_item` / `link_life_items` / `complete_lifeindex_sync` / 领域），其它写禁用 | 固定单页可读写（`read_lifeindex_page` / `replace_lifeindex_page`）|
 
 两个基座（Pi JS SDK / Codex）连同一个 `sisyphus-mcp`，工具面与门禁一致；换基座只换交互前端。
 
@@ -64,7 +64,12 @@ App 侧运行一个 MCP server（数据层之上的薄适配器），暴露下�
 | `propose_intents` | `{ capture_id }` | `{ candidates: [...] }` | 生成意图候选（带来源与置信度） |
 | `accept_intent` | `{ intent_id, edits? }` | `{ artifact_id }` | 落成 / 更新一个 artifact |
 | `record_feedback` | `{ intervention_id, label, text? }` | `{}` | 写 feedback 事件 |
-| `ingest_document` | `{ url \| file }` | `{ doc_id, summary, concepts }` | 材料摄取（第二大脑） |
+| `ingest_document` | `{ url \| file }` | `{ doc_id }` | 材料摄取（`material_text` 事件，不进意图收件箱）|
+| `next_actions` | `{ limit? }` | 带 `reason` 的 1–3 条最小行动 | 只读（确定性选择，见 [lifeindex-mind-system.md](lifeindex-mind-system.md) §4）|
+| `life_tree` | `{ kinds?, root_id? }` | 技能树/目标分解 + Core 算出的进度 | 只读 |
+| `review_queue` | `{ idle_days? }` | 周回顾要问的问题 | 只读 |
+| `kb_doctor` / `kb_wanted` | `{}` | 知识库体检报告 / 红链队列 | 只读 |
+| `intervention_outcomes` | `{ since_days? }` | 干预后的真实转移率 | 只读 |
 
 ### `query_context` 输出示例
 
@@ -72,15 +77,22 @@ App 侧运行一个 MCP server（数据层之上的薄适配器），暴露下�
 
 ```json
 {
-  "date": "2026-07-14",
-  "goal": { "text": "完成论文第三章", "status": "started" },
-  "stats": { "entertainment_minutes": 42, "work_minutes": 15, "intervention_count": 2 },
+  "date": "2026-07-30",
+  "goal": { "id": "…", "date": "2026-07-30", "raw_text": "完成论文第三章", "status": "started" },
+  "entertainment_minutes": 42.0,
+  "intervention_count": 2,
   "recent_interventions": [
-    { "shown_at": "14:32", "response": "continue" },
-    { "shown_at": "15:18", "response": "start_task" }
-  ]
+    { "shown_at": 1753848720000, "response": "continue", "outcome": "still_entertainment" },
+    { "shown_at": 1753852680000, "response": "start_task", "outcome": "switched" }
+  ],
+  "open_items": [ { "id": "…", "kind": "action", "title": "…", "…": "LifeItem 全字段" } ],
+  "next_actions": [ { "item_id": "…", "title": "…", "reason": "已逾期" } ],
+  "due_reminders": []
 }
 ```
+
+`date` 由 [`core::clock`](../../sisyphus/src-tauri/crates/core/src/clock.rs) 定义（本地时区 + 可配置换日点），**不是 UTC 日期**。
+`open_items` 来自 LifeDB（不是已收敛的 `tasks` 表）。
 
 ---
 

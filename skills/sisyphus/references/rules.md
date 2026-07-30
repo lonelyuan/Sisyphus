@@ -49,3 +49,21 @@
   `create_detection_rule("视频节制", {"category_prefix":"entertainment.video","min_minutes_in_window":25}, {"policy":"debounce","window_ms":3600000,"dedup_key":"video-limit"})`
 
 建完复述一句让用户确认：规则名 + 触发条件 + 会怎么提醒。用户想关掉/删掉时用 `set_detection_rule_enabled` / `delete_detection_rule`。
+
+## response 策略（都已可用，2026-07-30 修复）
+
+| policy | 语义 | 何时选它 |
+|---|---|---|
+| `immediate` | 命中即弹（`kind=notify` 或 `pet_message`）| 默认；需要当场打断 |
+| `deferred` | `now + after_ms` 再弹 | "先别烦我，过 10 分钟还在刷再说" |
+| `debounce` | `window_ms` 内同 `dedup_key` 只提醒一次 | 高频命中场景防打扰 |
+| `suppress` | 不打扰 | 夜间免打扰、明确不想被提醒的时段 |
+
+> `deferred` / `debounce` 此前有 bug（冷却按"通知弹出过"判断，而这两种策略命中时只入队 →
+> 冷却永远 ready → 采集器每 5–15s 重复入队 → 十分钟后几十条通知一起炸）。现在冷却与去重
+> 都看 `rule_fires`（命中当拍就记），`window_ms` 也真的生效。可以放心用。
+
+## 命中优先级
+
+同一拍多条规则命中时，按 `severity` 取最高；同级时**用户/智能体建的动态规则优先于内置规则**。
+所以要让某条规则更容易胜出，给它 `severity: "high"`。

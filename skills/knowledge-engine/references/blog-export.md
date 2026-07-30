@@ -42,3 +42,23 @@ npx quartz build              # 产出静态站到 public/，再部署
 - **Hugo**：想要更"正式博客"的主题生态时用，但 `[[wikilink]]`/图谱需插件适配、导出要一层转换。
 - **极简自建**：写个脚本把 `kb/*.md` 按 folder/tag 转成静态 HTML——最可控，但图谱/搜索要自己实现。
 当前选定 Quartz（最贴合"链接化知识花园 + 零改写发布 Obsidian vault"）。
+
+## 排除规则（2026-07-30 起改为按元信息）
+
+⚠️ **不能再按路径排除**：原始材料已经不住在 `sources/` 了，而是**就地放在 `kb/` 的话题文件夹里**
+（见 [../SKILL.md](../SKILL.md) 数据模型）。按 `sources/` 排除会一条都排不掉，把他人版权原文发出去。
+
+排除靠两个元信息，两者都由写入器自动打上：
+
+| 要排除的 | 标记 | 来源 |
+|---|---|---|
+| 逐字原文（他人版权） | frontmatter `publish: false` + tag `source` | `save_source` 自动写入 |
+| 公司内容 | 路径 `kb/work-mihoyo/**` + tag `公司` | 分类学约定 |
+
+Quartz 侧配置要点：
+- 开启 `explicit`/frontmatter 过滤，只发布 `publish` 不为 `false` 的页面；
+- 再按 tag `source` 与路径 `kb/work-mihoyo` 双重排除（冗余是故意的：漏一层还有另一层）；
+- 发布前用 `kb_doctor` 确认没有"公司卡被非公司卡引用"造成的意外泄漏路径。
+
+领域落地页：枢纽笔记**不叫 `index.md`**（它们改成了有意义的领域名，见 SKILL.md），
+因此接 Quartz 时要么让它自动生成文件夹页，要么显式配置枢纽为栏目首页。这一步在真正接博客时验证。

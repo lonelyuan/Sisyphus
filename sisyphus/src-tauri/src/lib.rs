@@ -270,6 +270,18 @@ pub fn run() {
                 _ => data_dir.join("vault"),
             };
             let _ = std::fs::create_dir_all(&vault_dir);
+            // vault 交给 git：整卡覆盖的风险从"不可逆"降为"可 diff 可回滚"，
+            // 并顺带得到版本历史与 blame（维基百科质量的支柱之一）。
+            sisyphus_core::vault::git_init_if_needed(&vault_dir);
+            // 索引是可重建的投影，vault 的 .md 才是本体：启动时追平一次
+            // （回填老库缺的正文/领域/链接边，也吸收用户在 Obsidian 里的手改）。
+            match sisyphus_core::knowledge::reindex_vault(&conn, &vault_dir) {
+                Ok(r) => eprintln!(
+                    "[startup] 知识库索引追平：扫 {} 张，新增 {}，更新 {}，链接 {}",
+                    r.scanned, r.inserted, r.updated, r.links
+                ),
+                Err(e) => eprintln!("[startup] 知识库索引追平失败: {e}"),
+            }
 
             // 监控名单：新装写 json 模板 + 把旧 json 覆盖项迁入 monitored_apps 表（一次性、幂等）。
             sisyphus_core::category::ensure_starter_categories(&data_dir);
@@ -374,6 +386,20 @@ pub fn run() {
             commands::list_life_item_edges,
             commands::get_lifeindex_sync_overview,
             commands::run_lifeindex_sync,
+            commands::list_lifeindex_runs,
+            commands::kb_doctor,
+            commands::kb_wanted,
+            commands::kb_reindex,
+            commands::refresh_mocs,
+            commands::life_tree,
+            commands::next_actions,
+            commands::review_queue,
+            commands::list_life_areas,
+            commands::upsert_life_area,
+            commands::intervention_outcomes,
+            commands::rebuild_rollups,
+            commands::set_day_boundary_hour,
+            commands::get_day_boundary_hour,
             check_usage_permission,
             request_usage_permission,
             start_collector,

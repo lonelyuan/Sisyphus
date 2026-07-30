@@ -9,6 +9,8 @@ const DAY = 86_400_000;
 type Detail = "minute" | "day" | "week" | "life";
 
 interface TimelineEvent {
+  /// 显著性等级：0 人生尺度仍可见，3 只在日/分钟尺度可见（LOD 过滤由后端做）
+  level?: number;
   id: string;
   kind:
     | "behavior"
@@ -39,12 +41,42 @@ interface DaySummary {
   state_score: number;
 }
 
+/// 预聚合条带：粗尺度的主数据，桶粒度随可见跨度自动变粗（day → week → month）。
+/// 代价是 O(可见桶数) 而非 O(事件数)，这是"无极缩放"能成立的前提。
+interface TimeBand {
+  bucket_start_ms: number;
+  bucket_end_ms: number;
+  observed_ms: number;
+  focus_ms: number;
+  entertainment_ms: number;
+  neutral_ms: number;
+  top_category: string | null;
+}
+
+/// 长期计划图层（LifeDB）：目标/项目/技能的跨度 + 里程碑点，progress 由 Core 确定性算出。
+interface PlanSpan {
+  id: string;
+  kind: "life_goal" | "life_project" | "life_milestone" | "life_skill";
+  title: string;
+  track: string;
+  status: string;
+  start_ms: number;
+  end_ms: number;
+  progress: number;
+  level: number;
+}
+
 interface TimelineResponse {
   start_ms: number;
   end_ms: number;
   detail: Detail;
+  /// 本次实际使用的桶粒度：day | week | month | none
+  bucket: string;
   events: TimelineEvent[];
   days: DaySummary[];
+  /// TODO(UI)：条带与计划图层的绘制是下一步的前端工作，后端数据已就绪。
+  bands: TimeBand[];
+  plans: PlanSpan[];
   truncated: boolean;
   has_long_term_source: boolean;
 }
@@ -61,8 +93,11 @@ const EMPTY: TimelineResponse = {
   start_ms: 0,
   end_ms: 0,
   detail: "day",
+  bucket: "none",
   events: [],
   days: [],
+  bands: [],
+  plans: [],
   truncated: false,
   has_long_term_source: false,
 };

@@ -28,11 +28,19 @@ const POLL_SECS: u64 = 5;
 #[cfg(not(debug_assertions))]
 const POLL_SECS: u64 = 15;
 
+/// 进行中会话的落盘间隔。**不能只在切换应用时才写事件**：一直待在同一个 app（看两小时
+/// 电影、连续刷两小时）时，Event log 里会一条记录都没有——时间线、rollup、近端结果观察
+/// 全都看不到这段时间。每 5 分钟把"已经过去的这一段"作为闭合区间落盘（Event log 保持
+/// append-only，不改历史事件）。
+const FLUSH_SECS: i64 = 300;
+
 /// 进行中的前台会话（内存态，防漏算：未切走的会话不在 DB）。
 struct Session {
     bundle: String,
     category: Option<String>,
     start_ms: i64,
+    /// 已落盘到哪一刻（切片式落盘的水位）。
+    flushed_until_ms: i64,
 }
 
 /// 线程入口：打开独立连接（WAL 支持与 App 同库并发），循环轮询。
@@ -44,7 +52,6 @@ pub fn run(db_path: PathBuf, app: AppHandle) {
             return;
         }
     };
-    let _ = conn.busy_timeout(Duration::from_secs(5));
     let engine = RuleEngine::new(RuleConfig::default());
 
     let mut session: Option<Session> = None;
@@ -75,13 +82,27 @@ fn tick(
     let changed = session.as_ref().map(|s| s.bundle != front).unwrap_or(true);
     if changed {
         if let Some(prev) = session.take() {
-            write_foreground_event(conn, &prev, now)?;
+            write_foreground_event(conn, &prev, prev.flushed_until_ms, now)?;
         }
         *session = Some(Session {
             bundle: front.clone(),
             category: category.clone(),
             start_ms: now,
+            flushed_until_ms: now,
         });
+    } else if let Some(s) = session.as_mut() {
+        // 长时间停在同一个 app：每 FLUSH_SECS 落一个闭合切片，避免"两小时无记录"。
+        if now - s.flushed_until_ms >= FLUSH_SECS * 1000 {
+            let from = s.flushed_until_ms;
+            let snapshot = Session {
+                bundle: s.bundle.clone(),
+                category: s.category.clone(),
+                start_ms: s.start_ms,
+                flushed_until_ms: from,
+            };
+            write_foreground_event(conn, &snapshot, from, now)?;
+            s.flushed_until_ms = now;
+        }
     }
 
     // 当前进行中的娱乐时长（防漏算，注入规则）。
@@ -92,7 +113,8 @@ fn tick(
     // 当前前台会话总时长（不限分类），供动态规则补入未闭合会话。
     let active_session_ms = session.as_ref().map(|s| now - s.start_ms).unwrap_or(0);
 
-    let today = Utc::now().format("%Y-%m-%d").to_string();
+    // 「今天」统一由 core::clock 定义（本地时区 + 换日点），不再用 UTC 日期。
+    let today = sisyphus_core::clock::today_str(conn);
     let goal = db::get_today_goal(conn, &today).map_err(|e| e.to_string())?;
 
     let ctx = RuleContext {
@@ -133,7 +155,15 @@ fn tick(
     Ok(())
 }
 
-fn write_foreground_event(conn: &Connection, s: &Session, end_ms: i64) -> Result<(), String> {
+fn write_foreground_event(
+    conn: &Connection,
+    s: &Session,
+    from_ms: i64,
+    end_ms: i64,
+) -> Result<(), String> {
+    if end_ms <= from_ms {
+        return Ok(());
+    }
     ingest_event(
         conn,
         USER_ID,
@@ -145,7 +175,7 @@ fn write_foreground_event(conn: &Connection, s: &Session, end_ms: i64) -> Result
             event_type: "app_foreground".to_string(),
             time_mode: "interval".to_string(),
             event_time: None,
-            start_time: Some(s.start_ms),
+            start_time: Some(from_ms),
             end_time: Some(end_ms),
             entity: Some(s.bundle.clone()),
             category: s.category.clone(),

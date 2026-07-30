@@ -12,7 +12,7 @@ fn timeline_switches_from_events_to_daily_aggregation() {
         "test-device",
         NewEvent {
             event_id: Some("timeline-event".into()),
-            source: "test".into(),
+            source: "desktop_agent".into(),
             layer: "raw".into(),
             event_type: "app_foreground".into(),
             time_mode: "interval".into(),

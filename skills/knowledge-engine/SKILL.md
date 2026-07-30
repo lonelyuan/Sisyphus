@@ -17,7 +17,27 @@ description: 知识工程与本地 Obsidian 第二大脑。仅当适用的 AGENT
 
 项目内更具体的 `AGENTS.md` 覆盖全局模式。模式只决定**是否和何时写入**，不放宽下文的分类、查重、溯源与数据边界。
 
-知识库 = 本地 Obsidian vault（`SISYPHUS_VAULT=/Users/chenzhongyuan/Obsidian/mihoyosec`）。你**只经 `sisyphus` MCP 工具**读写：`write_knowledge_note`（带 `folder`）/ `save_source` / `search_knowledge` / `list_knowledge` / `delete_note`（合并碎卡后清冗余）/ `ingest_document`。
+知识库 = 本地 Obsidian vault（`SISYPHUS_VAULT=/Users/chenzhongyuan/Obsidian/mihoyosec`）。你**只经 `sisyphus` MCP 工具**读写：
+
+| 工具 | 什么时候用 |
+|---|---|
+| `search_knowledge` | **每次动库前先查**。已含**正文**检索，能查到不在标题里的概念 |
+| `read_knowledge_note` | 改已有卡前**必须先读回**（整卡覆盖会丢内容）|
+| `append_knowledge_section` | **默认路径**：给已有结晶加/精一个 H2 小节（同名=精化，新名=增生），其余小节原样保留 |
+| `write_knowledge_note` | 只在确实是新结晶时用（过双筛）。`folder` 必须以 `kb/` 开头 |
+| `merge_knowledge_notes` | 结晶化归并：自动留别名、改入链、删碎卡，**不留断链** |
+| `delete_note` | 删单张卡（合并请用上一条，它更安全）|
+| `kb_doctor` | 整理知识库**先跑它**：断链/孤儿/重复/缺标签/超阈值目录/碎卡簇/目录漂移 |
+| `kb_wanted` | 红链队列 = 该补哪些卡（按被引用热度排序）|
+| `kb_reindex` | 用户在 Obsidian 里手改/移动/删过文件后追平索引 |
+| `save_source` | 归档重要原文，**必须给 folder**（就地放进话题夹）；外部原文必须给 url |
+| `refresh_mocs` | 写完新卡后刷新领域枢纽的目录区块（图谱层级靠它成立）|
+| `ingest_document` | 收下待加工素材 |
+
+**工具层已经在强制这些规则了**（违反会被拒绝并给出修正建议），所以别把它们当"建议"：
+`folder` 必须 `kb/` 开头 · 标题不超过 24 字 · tags 恰好一个类型 + 恰好一个可靠性档 ·
+至少一条 `links`（MOC 豁免）· **`已复现`/`已验证` 必须有 sources**。
+vault 已交给 git，每次写入自动快照——写错了可以 diff 和回滚，但这不是乱写的理由。
 
 **这版最要治的病：别每次对话结一张卡。** 卡的粒度 = 检索与复用的粒度，不是聊天轮次的粒度。**一张卡是一颗知识结晶，同主题多轮对话应让同一颗结晶长大变致密，而不是析出一堆碎晶。** 这是主循环的灵魂，详见 [references/crystallization.md](references/crystallization.md)。
 
@@ -25,12 +45,28 @@ description: 知识工程与本地 Obsidian 第二大脑。仅当适用的 AGENT
 
 ## 数据模型（先记住这张图）
 
-**两个物理隔离的存储，绝不混：**
-- `kb/` —— **知识图谱**：你总结的、结构化 + `[[链接]]` 化的卡片。**这就是博客内容。**
-- `sources/` —— **高价值外部原始材料库**：仅逐字归档重要的外部文章/报告（`save_source`）。**不是链接收件箱，不是每份材料的默认落点。** 用户本人持续维护的 KM/文档属于第一方成品：直接从相关 MOC/卡片链接原文，不复制进 `sources/`，也不另写一张“精炼版”制造双份真相。
+**一棵树，两种节点（2026-07-30 改制）：**
+- **知识卡片** —— 你总结的、结构化 + `[[链接]]` 化的结晶。**这就是博客内容。**
+- **原始材料**（`type: source`）—— 值得逐字保存的原文，**就地放在它讲的那个话题的文件夹里**
+  （不再有独立的 `sources/` 目录）。隔离靠**元信息**而不是目录：
+
+  | 关注点 | 怎么做到 |
+  |---|---|
+  | 不污染图谱 | **单向连接**：卡片/枢纽 → 原文；原文自己**不出链**（图上是叶子）。工具层会拒绝有出链的 source |
+  | 不外发 | frontmatter `publish: false` + tag `source`，博客按此排除 |
+  | 能找到 | 就在话题夹里，和相关卡片相邻；领域枢纽有「原始材料」区块 |
+  | 保持干净 | `save_source` 要求 url（本人自撰传 `source_type="first-party"`）；`kb_doctor` 报"没人引用的原文" |
+
+  **不该逐字复制的**：公司 KM 这类你能直接开链接的第一方成品、目录/索引类快照——
+  在卡片正文里引用 URL 就够。副本只会制造双份真相，而且永远追不上原文。
+  （实测清掉过 11 份这类副本，其中 3 份目录快照就有 2220 行纯链接列表。）
 
 **两个正交的分类轴：**
 - **话题领域 = 文件夹树 = 博客栏目**（`write_knowledge_note` 的 `folder`，**值一律以 `kb/` 开头**）：`kb/web-security` / `kb/network-infra`（含 `identity-system` 等子话题）/ `kb/ai-redteam` / `kb/work-mihoyo/{state,best-practice}` / `kb/personal`。持续维护使各栏目粒度均衡、抽象一致（详见 [references/taxonomy.md](references/taxonomy.md)）。
+  **每个领域恰好一个枢纽笔记**（tag `hub` + `moc`），名字就是领域名（`网络与基础设施`、`Web 安全`…）。
+  枢纽**不叫 `index.md`**：Obsidian 图谱的节点标签用的是文件名，一堆 `index` 在图上就是一堆无法区分的点。
+  枢纽的「子领域 / 卡片 / 原始材料」清单由 `refresh_mocs` **确定性生成**，你只写领域叙述——
+  手写目录必然漂移，而"枢纽真的连着它下面的卡片"是图谱里出现树状层级的唯一机制。
 - **文章类型 = frontmatter `type` + 标签**（不是文件夹）：`theory` / `news` / `state` / `best-practice` / `personal`。**决定生命周期与链接规则**（详见 [references/types.md](references/types.md)）——这是这版的关键：不同类型不能用同一套规则，尤其 `state`（我司现状）与 `best-practice`（理想）绝不混、`personal` 不与技术强链。
 
 ## 四大场景（功能路由）
@@ -66,6 +102,8 @@ description: 知识工程与本地 Obsidian 第二大脑。仅当适用的 AGENT
    - **没有** → 过[原子性双筛](references/crystallization.md#原子性双筛它配单独一张卡还是只是某颗结晶的一节)：*会被直接按名检索吗？会被 ≥2 主题引用/会撑爆母卡吗？* **两关都过才新建一颗**；有一关不过，说明它是某颗结晶的**小节**——归并进去（母结晶不存在就新建母结晶、把它当第一节播下）。
 5. **建/长卡**：仅 `strong` 或已获用户写入授权时调用 `write_knowledge_note(folder=…, title, body, tags, links, sources)`；格式严格照 [references/format.md](references/format.md)。正文按 H2 小节组织，`links` 只填已存在且关系明确的卡片，跨 type 链接遵守 types.md。
 6. **回报**：`strong`/已授权写入后用 `📚 已沉淀：长入 [[雅思备考]]·新小节「分数水平」 / 新建 [[X]]（web-security/theory）…`；`weak` 未授权时用 `📚 可沉淀：长入 [[X]]·小节「Y」；需要我写入吗？`。没有合格候选时不显示尾注。
+   写入返回里的 `wanted_links` 是本次留下的**红链**（引用了还不存在的卡）——那不是错误，是知识缺口；
+   值得的话在回报里点一句"顺带留了个缺口 [[X]]，要深研可以从它开始"。
 
 ## 铁律
 
@@ -73,8 +111,9 @@ description: 知识工程与本地 Obsidian 第二大脑。仅当适用的 AGENT
 2. **标题短，关系先行**：标题只保留主题规范名，默认 2–8 个汉字或 ≤5 个英文词；组织、公司、类型、时间、状态和内容摘要交给 folder/tags/正文。先确定母节点与真实关系，再允许新建；禁止用长标题代替知识组织。
 3. **不确定标 `#待确认`，绝不编造**：证据不足进「待确认」区，别写成肯定句。
 4. **必分类、必织图**：每张卡必有 `folder` 和 `type`；至少 1 条有语义的 `links`。无处可归先提议新领域或补 MOC，别丢根目录。
-5. **三个隔离**：① `sources/` 只存重要外部原文，绝不进 kb 图谱；② 第一方成品只链接、不复制、不二次精炼；③ `state`（我司现状）与 `best-practice`（理想）绝不写进同一张卡，用 gap 链接表达差距。
-6. **平衡 + 结晶化维护**：领域 >~12 卡提议拆子话题，长期 <2 卡提议上并；发现同主题碎卡簇（如 `雅思*`）→ 走[去碎片化例程](references/crystallization.md#去碎片化defragment例程)合并 + `delete_note` 清冗余（[references/taxonomy.md](references/taxonomy.md)）。
+5. **三个隔离**：① 原始材料靠 `type: source` + 单向连接 + `publish: false` 隔离（**不是**靠目录，它就地放在话题夹里）；② 第一方成品（公司 KM 等）只链接、不复制、不二次精炼；③ `state`（我司现状）与 `best-practice`（理想）绝不写进同一张卡，用 gap 链接表达差距。
+6. **平衡 + 结晶化维护**：**先跑 `kb_doctor`，按它的报告修，不要靠感觉扫**（你无法在上下文里可靠统计几十上百张卡的图结构）。领域 >~12 卡提议拆子话题，长期 <2 卡提议上并；碎卡簇走 `merge_knowledge_notes`。
+7. **可靠性不能自升**：模型自身知识只配 `待确认`。`已复现` 要真跑通过并留证据，`已验证` 要人工确认——工具层会拒绝无 sources 的高档位声明。
 
 ## 数据边界
 
@@ -87,7 +126,18 @@ description: 知识工程与本地 Obsidian 第二大脑。仅当适用的 AGENT
 
 ## 安装 / 现状
 
-MCP 与 `SISYPHUS_VAULT` 已配（见 [../sisyphus/references/install.md](../sisyphus/references/install.md)）。vault 骨架（`kb/` 各领域 `index.md` + `sources/`）已播种。新增工具：`write_knowledge_note` 的 `folder` 参数、`save_source`、`delete_note`（合并碎卡后清冗余）。批量/深研派发用 `services/knowledge-agent`。
+MCP 与 `SISYPHUS_VAULT` 已配（见 [../sisyphus/references/install.md](../sisyphus/references/install.md)）。vault 骨架（`kb/` 各领域 `index.md` + `sources/`）已播种。批量/深研派发用 `services/knowledge-agent`。
+
+**2026-07-30 起的重要变化（会影响你的动作选择）**：
+- **文件名 = 标题**（不再 slugify）。此前 `AD CS` 被写成 `ad-cs.md`，而链接写的是 `[[AD CS]]`，
+  Obsidian 按文件名解析 → 实测 354 条 wikilink 断了 63 条（18%）。已迁移，现在 1.1%。
+- **一个概念一张卡**由数据库唯一索引保证；同标题换 folder 是移动而不是复制。
+- **约束在工具层执行**：分类、类型、可靠性、关联、证据都会被校验。规则不再只是提示。
+- **`append_knowledge_section` 是默认写入路径**，`write_knowledge_note` 是例外。
+- **`kb_doctor` / `kb_wanted` 提供反馈闭环**：你第一次能看到"我上次写的卡入度是 0""这个链接断了""这个目录已经 22 张"。
+- **原始材料改为就地存放**（`sources/` 目录已取消），隔离靠 `type: source` + 单向连接 + `publish: false`。
+- **领域枢纽改名 + `hub` 标记 + 目录由 Core 生成**，图谱里能直接读出文件夹层级。
+- **`extract_wikilinks` 跳过代码区**：文档里写 `` `[[链接]]` `` 讲语法不再被误判成红链。
 
 ## 未来方向 · CTF / 科研拓展（北极星，暂未实现）
 

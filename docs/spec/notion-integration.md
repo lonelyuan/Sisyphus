@@ -19,17 +19,27 @@
 - `project`：为目标组织的一段工作。
 - `action`：具体事项，或有明确时间节点的事。
 - `routine`：需要反复发生的日常/习惯。
+- `skill`：能力节点（技能树的根；前置关系用 `depends_on` 边）。
+- `milestone`：可判定的检查点（目标/技能的分解产物）。
 
-两个正交维度避免强迫用户只选一种分类：
+技能树的形状与进度算法见 [lifeindex-mind-system.md](lifeindex-mind-system.md)。
+
+正交维度避免强迫用户只选一种分类：
 
 - `track = main | side | neutral | undecided`：主线、支线、中性、未判断。
 - `horizon = now | next | later | someday | unscheduled`：时间尺度。
+- `area_id → life_areas`：责任领域（GTD Horizon 3，无完成态）。`focus=1` 的领域参与主线推导与今日行动选择——
+  这一层的缺失曾是"主次只能一条条手标、维护起来不丝滑"的主要来源。
+
+可判定与度量：`success_criteria`、`target_value` / `current_value` / `unit`、`review_at_ms`（idea 的毕业审查）。
 
 `life_item_edges` 用邻接表表达 `contains / supports / depends_on / blocks / derived_from / related`。SQLite recursive CTE 足以覆盖当前目标→项目→行动/日常结构，不引入图数据库。
 
 ### LifeDB
 
-LifeDB 由 SQLite 的 `life_items`、`life_item_edges`、`life_item_external_refs`、`life_sync_state`、`life_sync_runs` 组成。约束、revision、同步脏标记和审计基线由 Core 确定性执行；Agent 不能绕过枚举和外键约束。
+LifeDB 由 SQLite 的 `life_items`、`life_areas`、`life_item_edges`、`life_item_external_refs`、`life_sync_state`、`life_sync_runs` 组成。
+**人生规划域内只有一个事实源**：旧 `tasks` 表已收敛（`accept_intent(kind=task)` 直接落 `action`，
+`query_context` / `today_actions` 读 LifeDB），不再存在"看板与今日视图各说一套"的情况。约束、revision、同步脏标记和审计基线由 Core 确定性执行；Agent 不能绕过枚举和外键约束。
 
 ### LifeIndex
 
@@ -91,12 +101,15 @@ App 只展示同一 LifeDB 的四个重叠过滤视图：
 
 ## 5. 投影格式
 
-Notion 普通页由 Core 生成固定结构：事项、日常、主线、支线、待整理。每个条目包含状态、标题、kind、track、horizon、可选截止日期与正文，并带稳定 LifeItem 注释标记。
+Notion 普通页由 Core 生成固定结构：事项、日常、**技能与里程碑**、主线、支线、待整理。每个条目包含状态、标题、kind、track、horizon、可选截止日期与正文，并带稳定 LifeItem 注释标记。
 
 四视图有意重叠，因此同一条目可能在 Notion 出现两次；两处使用同一 ID，Agent 必须合并为一个 LifeItem。Notion 是可编辑投影，不要求用户维护机器字段。
 
 ## 6. 失败与恢复
 
+- **整页替换是这条链路上唯一不可逆的一步**，因此必须有恢复入口：`life_sync_runs` 保存每轮的写回前全文，
+  用 `list_lifeindex_runs` 找到那一轮、`lifeindex_rollback_text(run_id)` 取回全文，再由 `LifeIndexSync`
+  模式交给 `replace_lifeindex_page` 写回。**开启同步前先确认这条路径可用。**
 - Notion 读取/写入失败：不调用 complete，保留 dirty 状态，并写 `life_sync_state.last_error`。
 - Agent 进程返回但没有完成写回确认：宿主判定本轮失败。
 - 页面含不允许删除的子页面/数据库时，整页替换会失败而不是破坏内容。

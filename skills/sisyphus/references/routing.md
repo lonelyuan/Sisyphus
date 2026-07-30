@@ -6,8 +6,12 @@ MCP 工具面（`sisyphus` server）完整签名与用法。所有工具即使�
 
 - `capture(text)` → `captured: <event_id>`。**任何用户态输入先调它**；普通代码开发、测试和文档修改指令不调。返回的 event_id 用于 `propose_intents`。
 - `list_captures(unprocessed?=true)` → `[{event_id, text, created_at}]`。本地待处理记录；`unprocessed=true` 只列还没生成候选的。它不是 Notion Inbox。
-- `query_context()` → `{date, goal, entertainment_minutes, intervention_count, open_tasks[], due_reminders[], recent_interventions[]}`。规划/复盘前先调。
-- `today_actions()` → `["…"]`（1–3 条）。
+- `query_context()` → `{date, goal, entertainment_minutes, intervention_count, open_items[], next_actions[], due_reminders[], recent_interventions[]}`。规划/复盘前先调。
+  - `date` 是**本地逻辑日**（可配换日点），不是 UTC 日期。
+  - `open_items` 来自 LifeDB（`tasks` 表已收敛，不再是事实源）。
+  - `recent_interventions[].outcome` 是近端结果（`switched` / `mixed` / `still_entertainment` / `unknown`）。
+- `next_actions({limit?})` → `[{item_id,title,kind,track,due_at_ms,reason}]`。**规划时优先用它**，理由可以直接讲给用户。
+- `today_actions()` → `["…"]`（1–3 条，窄接口；要理由用 `next_actions`）。
 
 ## 笔记 / 素材（→ Core note）
 
@@ -27,6 +31,10 @@ MCP 工具面（`sisyphus` server）完整签名与用法。所有工具即使�
   - `kind="reminder"`，`proposed={text, remind_at_ms, recurrence?}`。**`remind_at_ms` 必填、真实 epoch 毫秒**——到点端侧（macOS 采集器 / Android 前台服务）会自动弹通知。
   - `kind="goal"`，`proposed={text}`（等价 set_goal）。
   - `kind="note"`，`proposed={title?, body, tags?}`（想法 / 素材 / 偏好；情绪打 `tags:["mood"]`）。
+  - `kind="life_item"`，`proposed={kind, title, track?, horizon?, area_id?, success_criteria?, target_value?, unit?, due_at_ms?}`（人生看板对象，含 skill / milestone）。
+  - `kind="rule"`，`proposed={name, trigger, response?, severity?, cooldown_minutes?}`（检测规则）。
+  > `life_item` 与 `rule` 走候选桥的意义：这两类副作用最大（写看板会同步 Notion、建规则会产生通知），
+  > 经桥才有来源、置信度和可回滚状态。别绕过它直接写库。
 - `accept_intent(intent_id, edits?)` → 落成 artifact。`edits` 是覆盖候选字段的 JSON（用户就地改）。
 - `ignore_intent(intent_id)` → 忽略（不落库）。
 - 拿不准时间/优先级就**留空别编**。一条 capture 通常只提 1 个候选。
@@ -40,14 +48,19 @@ MCP 工具面（`sisyphus` server）完整签名与用法。所有工具即使�
 - `add_monitored_app(id, category)` → 把某娱乐 app 纳入监控。`id`=bundle id / 包名，`category`=`entertainment.video|game|social|news`。桌面 + 安卓即时生效。
 - `remove_monitored_app(id)` → 移除。
 - 机制：用户设了目标 + 停留在监控名单内的 app 超过阈值（debug 1min / release 15min）+ 冷却满足 → 端侧自动弹「不羞辱、引用真实时长和目标」的干预通知（四按钮：开始任务 / 休息 / 继续 / 放弃今日）。你不需要逐拍驱动，配好即可。
+- `intervention_outcomes({since_days?})` → 干预后 10/30 分钟的真实去向统计（`switch_rate`）。复盘时引用它。
 - 常见包名：抖音 `com.ss.android.ugc.aweme`、B站 `tv.danmaku.bili`、快手 `com.kuaishou.nebula`、小红书/微博 `com.sina.weibo`、YouTube `com.google.android.youtube`（多数已内置，`list_monitored_apps` 可查）。
 
 ## LifeIndex / LifeDB（→ 长短期人生看板）
 
 判定：长期目标、项目、具体行动、日常习惯、想发展的主线/支线，或用户明确说“放进人生看板”。
 
-- 五种形态：`idea | goal | project | action | routine`。
-- 两个正交维度：`track=main|side|neutral|undecided`，`horizon=now|next|later|someday|unscheduled`。
+- 七种形态：`idea | goal | project | action | routine | skill | milestone`。
+  - `skill` = 能力节点（用 `depends_on` 边表达前置能力）；`milestone` = 可判定的检查点。
+- 三个正交维度：`track=main|side|neutral|undecided`，`horizon=now|next|later|someday|unscheduled`，
+  `area_id`（责任领域，`list_life_areas` 取；`focus` 领域参与主线推导）。
+- 可判定字段：`success_criteria`（goal/milestone 尽量填，否则永远无法收敛）、`target_value`/`current_value`/`unit`（度量）、`review_at_ms`（idea 的毕业审查，建议 +7 天）。
+- 读模型：`life_tree`（技能树/目标分解 + **Core 算好的进度**）、`review_queue`（周回顾问题）、`next_actions`（下一步）。
 - 先 `capture` 原话，复述你准备写入的最小结构；用户认可后调用 `upsert_life_item(origin="agent")`。
 - 未知字段保持 `undecided/unscheduled/inbox`，不要为了整齐猜时间、主次和优先级。
 - 目标/项目包含子项时用 `link_life_items(relation="contains")`；不要一次生成任务海。

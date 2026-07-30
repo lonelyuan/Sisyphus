@@ -13,6 +13,8 @@
 | `state` | **我司现状**：miHoYo 实际怎么做的 | 现状更新（带日期留痕） | 随公司变 | 仅本地；与 best-practice 建 gap 链，**不合并** |
 | `best-practice` | **企业最佳实现**：行业理想/标准 | 补充式 | 长期 | 链 theory；**不掺我司细节** |
 | `personal` | 个人/非技术 | 随意 | — | **不强行**链技术卡 |
+| `moc` | 领域枢纽/概念地图 | 结构性内容由 `refresh_mocs` 生成 | 跟着领域 | 靠出链组织领域；每领域恰好一个带 `hub` 的枢纽 |
+| `source` | **原始材料**（逐字原文）| 快照，基本不改 | 跟着来源 | **只被指向、自己不出链**（图谱叶子）；`publish: false` 不外发；无可靠性档位但必须有溯源 |
 
 ## theory —— 补充式增长（重点）
 
@@ -50,7 +52,8 @@
 ## 每种 type 的 frontmatter 标签
 
 除领域标签外，卡片 `tags` 必含：
-- type 标签：`theory` / `news` / `state` / `best-practice` / `personal`
+- type 标签：`theory` / `news` / `state` / `best-practice` / `personal` / `moc` / `source`
+  （`moc` 与 `source` 不需要可靠性档位：前者是目录，后者的可信度就是它的来源本身）
 - **可靠性阶梯**（技术/安全类卡尤其要标；由低到高，只标当前档）：
   - `待确认` —— **默认**。模型说法或单一来源，证据不足。写成保留句、不写死。
   - `多源印证` —— ≥2 个**独立可信来源**交叉支持（对应 KnownEngine 的 Corroborated）。

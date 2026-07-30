@@ -30,8 +30,12 @@
 
 - **InputBox（无压力记录）—— 总入口**：兼容跨端输入源（Codex、Notion，后续加西西弗斯 APP 本地输入），把任意一句话原样接住（`capture`）。经**意图识别智能体**（现为 Codex/Claude runtime，后期自建 Agent 底座）做**功能路由**，调对应模块。
 - **模块一 · 狭义西西弗斯（习惯培养 / 对抗拖延）**：采集端 → 行为日志库 → 习惯引擎（规则 / ML）→ 提醒干预端。项目最早的闭环，即感知平面。
-- **模块二 · LifeIndex（人生看板）**：SQLite LifeDB 保存 idea/goal/project/action/routine 及关系；App 提供事项/日常/主线/支线四个严格重叠视图；Notion 是用户可自由编辑的普通文本输入/投影。隔离的 LifeIndexSync Agent 做三方语义合并。见 [notion-integration.md](notion-integration.md)。
-- **模块三 · 第二大脑（知识库 / 知识图谱）**：以 Markdown vault 为存储介质，配调研 / 验证 / 梳理智能体构建个人知识库；后续可派生知识图谱（图数据库）。
+- **模块二 · LifeIndex（人生看板 → 心智系统）**：SQLite LifeDB 保存 idea/goal/project/action/routine/skill/milestone、责任领域与关系；App 提供事项/日常/主线/支线四个严格重叠视图，以及**技能树**与**无极时间线**两个心智入口；Notion 是用户可自由编辑的普通文本投影。隔离的 LifeIndexSync Agent 做三方语义合并。见 [notion-integration.md](notion-integration.md) 与 [lifeindex-mind-system.md](lifeindex-mind-system.md)。
+- **模块三 · 第二大脑（知识库 / 知识图谱）**：以 Markdown vault 为存储介质（vault 交给 git，得到版本历史与回滚），配调研 / 验证 / 梳理智能体构建个人知识库。**质量靠机械设施而非提示**：标题唯一 + 别名重定向、分类/类型/可靠性/关联必填、`kb_doctor` 维护报告、红链队列驱动主动调研。
+  一棵话题树，两种节点：**知识卡片**（结晶，可外发）与**原始材料**（`type: source`，就地存放、
+  单向被指向、`publish: false` 不外发）。每个领域一个 `hub` 枢纽，其目录由 Core 确定性生成——
+  这既修掉了手写目录的漂移，也是 Obsidian 图谱里出现树状层级的唯一机制（图谱不渲染文件夹节点）。
+  后续可派生知识图谱（图数据库）。
 
 > InputBox / 意图识别 / 三模块是**产品组件视图**，不改变 §2 的双存储与 §3 的 `ingest_event` 唯一契约：InputBox = `capture`，意图识别 = `propose_intents`，模块产物落 Artifact store 或 vault。**被动采集不经 InputBox**，直接进狭义西西弗斯（感知平面）。
 
@@ -91,7 +95,9 @@
 
 - 可变、有生命周期、有 status 的对象：`goals`、`tasks`、`notes`、`interventions`、`knowledge_nodes` 等，**各自建表**。
 - **禁止**造一张多态大表 `artifacts` 用 type 字段兜住目标+任务+笔记+知识节点——那是过度抽象，是"Core 推不动"的病根。
-- LifeDB 只统一人生规划域，并用 `life_item_edges` 承载目标→项目→行动/日常等关系；其它 artifact 不塞进 LifeItem。
+- LifeDB 只统一人生规划域，并用 `life_item_edges` 承载目标→项目→行动/日常/技能/里程碑等关系；其它 artifact 不塞进 LifeItem。
+- **人生规划域内不许有第二个事实源**：`tasks` 已收敛进 `life_items`（`accept_intent(kind=task)` 直接落 action，`today_actions`/`query_context` 读 LifeDB）。此前"看板写 life_items、今日读 tasks"导致在看板里做完的事第二天仍被提醒。
+- **schema 演进必须走 `core::migrations`**（`PRAGMA user_version`）：`CREATE TABLE IF NOT EXISTS` 对已存在的表是空操作，加列不生效。
 
 ### 2.3 一条铁律
 
@@ -119,12 +125,17 @@ LifeDB 是人生规划域的本地事实层。Notion 不进入 Event log，也�
 
 ```rust
 // Rust 侧统一入口（感知平面各源、反思平面 capture 都调它）
-fn ingest_event(event: BehaviorEvent) -> Result<()>;
-//   1. 校验信封与 privacy_level
-//   2. append 写入 Event log（INSERT OR IGNORE，幂等）
+fn ingest_event(event: BehaviorEvent) -> Result<String>;
+//   1. 校验信封（ingest::validate）：source/layer/time_mode/privacy_level 枚举白名单；
+//      interval 必须有 start+end 且 end≥start；point 必须有时间戳。不合法直接拒绝。
+//   2. append 写入 Event log（event_id 幂等；未插入且 event_id 不在库里 → 报错，不静默丢）
 //   3. 写 outbox（供后期同步）
 //   4.（可选）就地触发引擎评估
 ```
+
+**这是闸门，不是直通管道。** 守住校验 → 脏事件进不了规则引擎与时间线；守不住 → `category` 混进 capture 种类、区间事件没有 end_time 这类问题会一路流到下游。
+
+`seq_no` 由 `device_seq` 计数器表单语句原子自增（**不能用 `MAX+1`**：并发下两个同 `device_id` 的写入者会算出同一个 seq_no，撞 `UNIQUE(device_id,seq_no)` 后被 `INSERT OR IGNORE` 静默吞掉，却照样返回一个库里不存在的 event_id）。
 
 - 守住这一个契约 → "一个图标、可插拔的统一 SOC"自然成立。
 - 守不住 → 得到三个互不相通的数据孤岛。
@@ -155,7 +166,11 @@ App 侧把数据层能力以 **MCP 工具** 暴露给 Agent（先挂 Codex / Cla
 
 - 位置：`sisyphus/src-tauri/crates/mcp`（bin `sisyphus-mcp`）。
 - 由 Codex/Claude Code 作为子进程 stdio 拉起；打开与 App 同一个 `sisyphus.db`（WAL + `busy_timeout` 支持跨进程并发），**App 未运行也能工作**。
-- 已实现工具：`capture` / `query_context` / `today_actions` / `set_goal`（MVP，未提前造 intent/artifact 工具）。
+- 已实现工具面（2026-07-30）：意图桥（`capture` / `list_captures` / `propose_intents` / `accept_intent` / `ignore_intent`）、
+  今日（`query_context` / `next_actions` / `today_actions` / `set_goal`）、
+  LifeDB（`list/upsert_life_item` / `link_life_items` / `life_tree` / `review_queue` / 领域 / 同步与回滚）、
+  第二大脑（`search/read/write/append/merge/delete` + `kb_doctor` / `kb_wanted` / `kb_reindex` / `save_source`）、
+  反拖延（监控名单 / 检测规则 CRUD / `intervention_outcomes`）。完整变更见 [api.md](api.md)。
 - **交付物,不接进本开发仓库**:用户侧把 `sisyphus-mcp` 注册进自己的 Codex/Claude,并配合 skill `skills/sisyphus/`(内含安装与每日规划/复盘例程 + 定时任务模板)。本 dev 仓库的 `.codex/config.toml` 只保留开发用的 supabase MCP。
 
 ---
@@ -229,8 +244,12 @@ Android 采集源以 Kotlin Tauri 插件形式接入 `sisyphus/`，见 [android-
 | 模块 | 暂缓项 |
 |---|---|
 | 狭义西西弗斯 | IoT / 可穿戴端采集、跨端同步、RL 跨端学习 |
-| LifeIndex | 无极时间线、技能树、跨用户服务端同步 |
-| 第二大脑 | 知识图谱（图数据库）派生 |
+| LifeIndex | 跨用户服务端同步 |
+| 第二大脑 | 知识图谱（图数据库）派生、FTS5 / 向量检索、CTF 沙箱验证器 |
+
+> **技能树与无极时间线不在暂缓表里**（2026-07-30 修正）：它们是 LifeIndex 心智系统的重要组件，
+> 存储底座已落地（`kind=skill|milestone` + `depends_on` DAG + 可判定度量 + `time_rollups` 预聚合 + 显著性分层），
+> 待做的是前端画布。契约见 [lifeindex-mind-system.md](lifeindex-mind-system.md)。
 
 ---
 
@@ -249,6 +268,8 @@ Android 采集源以 Kotlin Tauri 插件形式接入 `sisyphus/`，见 [android-
 
 **LifeIndex 双向同步**：每日或 LifeDB 变更触发 `agent_run(mode=lifeindex_sync)`；Agent 经受限网关读取唯一 Notion 页面，三方合并后更新 LifeDB，再把 Core 生成的普通 Markdown 写回该页。其它主动建议仍使用 `RunMode::Proactive`，只读且只返回一条建议。
 
-**现状（2026-07）**：调度器骨架、`ResponsePolicy` seam、`notify`/`pet_message`/`agent_run` 执行器、动态检测规则和 LifeIndexSync 均已落地；Pi 与 Codex 两基座连同一 `sisyphus-mcp`，工具面按 `Interactive / Proactive / LifeIndexSync` 运行模式白名单隔离（见 [agent.md](agent.md)）。
+**现状（2026-07-30）**：调度器骨架、`ResponsePolicy` seam、`notify`/`pet_message`/`agent_run`/`observe_outcome` 执行器、动态检测规则、LifeIndexSync、周回顾 job 均已落地；Pi 与 Codex 两基座连同一 `sisyphus-mcp`，工具面按 `Interactive / Proactive / LifeIndexSync` 运行模式白名单隔离（见 [agent.md](agent.md)）。
+
+冷却与去重的唯一依据是 `rule_fires`（命中当拍就记），**不是**"通知有没有弹"——否则 `Deferred`/`Debounce` 策略下会每拍重复入队（见 [rule-engine.md](rule-engine.md)）。
 
 完整数据模型、响应策略、执行器、可靠性与 MVP 边界见 [proactive-triggers.md](proactive-triggers.md)。

@@ -28,12 +28,15 @@ pub fn run(db_path: PathBuf, _vault_dir: PathBuf, data_dir: PathBuf, app: AppHan
             return;
         }
     };
-    let _ = conn.busy_timeout(Duration::from_secs(5));
     seed_daily_jobs(&conn);
     eprintln!("[scheduler] 主动触发 ticker 启动，tick={TICK_SECS}s");
 
     loop {
         let now = chrono::Utc::now().timestamp_millis();
+        // 无极时间线的预聚合桶：每拍追平（没有新行为事件时只花一次索引查询）。
+        if let Err(e) = sisyphus_core::rollups::catch_up(&conn) {
+            eprintln!("[scheduler] rollup catch_up error: {e}");
+        }
         match scheduler::due_actions(&conn, now) {
             Ok(due) => {
                 for a in &due {
@@ -71,6 +74,26 @@ fn seed_daily_jobs(conn: &rusqlite::Connection) {
         Ok(Some(id)) => eprintln!("[scheduler] 播种每日9点主动推荐 job: {id}"),
         Ok(None) => {} // 已存在 pending，幂等跳过
         Err(e) => eprintln!("[scheduler] seed job failed: {e}"),
+    }
+
+    // 周回顾（GTD weekly review）：LifeDB 的判断由 Core 算好，agent 只负责问与措辞。
+    // 这是"看板不变成新焦虑源"的唯一已被反复验证的机制。
+    let wr_due = scheduler::next_due("daily@20:10", now).unwrap_or(now);
+    match scheduler::enqueue_action(
+        conn,
+        &NewAction {
+            kind: "agent_run",
+            payload_json: r#"{"mode":"weekly_review","topic":"周回顾：读 review_queue 与 next_actions，只在周日提问，其余日子返回 no_recommendation"}"#,
+            due_at_ms: wr_due,
+            recurrence: Some("daily@20:10"),
+            dedup_key: Some("weekly-review"),
+            origin_event_id: None,
+            created_by: "scheduler",
+        },
+    ) {
+        Ok(Some(id)) => eprintln!("[scheduler] 播种周回顾 job: {id}"),
+        Ok(None) => {}
+        Err(e) => eprintln!("[scheduler] seed weekly review failed: {e}"),
     }
 
     // 取消旧版单向只读刷新，迁移到每日双向 LifeIndexSync。
@@ -119,10 +142,36 @@ fn dispatch(
     match a.kind.as_str() {
         "notify" => finish(conn, &a.id, do_notify(app, &a.payload_json)),
         "pet_message" => finish(conn, &a.id, do_pet_message(app, &a.payload_json)),
+        // 近端结果观察：纯数据回填，不打扰用户。
+        "observe_outcome" => finish(conn, &a.id, do_observe_outcome(conn, &a.payload_json)),
         "agent_run" => spawn_agent_run(db_path, data_dir, app, a),
         other => {
             eprintln!("[scheduler] 未知 kind「{other}」跳过（执行器待实现）");
             finish(conn, &a.id, false);
+        }
+    }
+}
+
+/// 干预后 10/30 分钟回看：这段时间里用户在干什么，回填 `interventions.outcome`。
+/// 这是 1.1 唯一的学习信号——把"感觉有没有用"变成"数据说话"。
+fn do_observe_outcome(conn: &rusqlite::Connection, payload_json: &str) -> bool {
+    let v: Value = serde_json::from_str(payload_json).unwrap_or(Value::Null);
+    let Some(id) = v.get("intervention_id").and_then(|x| x.as_str()) else {
+        return false;
+    };
+    let minutes = v
+        .get("after_minutes")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(10);
+    match sisyphus_core::intervention::observe_outcome(conn, id, minutes) {
+        Ok(Some(outcome)) => {
+            eprintln!("[scheduler] 近端结果 {id} +{minutes}min → {outcome}");
+            true
+        }
+        Ok(None) => true, // 已回填过 / 干预不存在：不是错误
+        Err(e) => {
+            eprintln!("[scheduler] observe_outcome failed: {e}");
+            false
         }
     }
 }
@@ -188,7 +237,6 @@ fn spawn_agent_run(db_path: &PathBuf, data_dir: &PathBuf, app: &AppHandle, a: &S
                 return;
             }
         };
-        let _ = conn.busy_timeout(Duration::from_secs(5));
         let ok = do_agent_run(&conn, &data_dir, &app, &payload);
         finish(&conn, &id, ok);
     });
@@ -248,6 +296,49 @@ fn do_agent_run(
             Err(e) => {
                 let _ = sisyphus_core::lifedb::fail_sync(conn, &target_id, &e);
                 eprintln!("[scheduler] lifeindex_sync failed: {e}");
+                false
+            }
+        };
+    }
+
+    if mode_str == "weekly_review" {
+        use chrono::Datelike;
+        let weekday = chrono::Local::now().weekday();
+        if weekday != chrono::Weekday::Sun {
+            return true; // 只在周日回顾，其余天静默
+        }
+        let queue = sisyphus_core::lifetree::review_queue(conn, 7)
+            .ok()
+            .and_then(|q| serde_json::to_string(&q).ok())
+            .unwrap_or_else(|| "{}".to_string());
+        let prompt = format!(
+            "周回顾。{topic}\n本地今日快照：{local}\n回顾队列（Core 已算好，别自己数）：{queue}\n\
+             用关心不评判的语气总结这一周，并只挑最重要的 1–2 条提问（升级 / someday / 归档 三选一）。\n\
+             不得调用任何写工具；若这周没什么值得问的，只返回 no_recommendation。"
+        );
+        return match agent_runtime::run_agent(
+            data_dir,
+            &prompt,
+            None,
+            None,
+            agent_runtime::RunMode::Proactive,
+        ) {
+            Ok(out) => {
+                let text = out.text.trim();
+                if text.eq_ignore_ascii_case("no_recommendation") || text.is_empty() {
+                    return true;
+                }
+                let _ = app.emit("agent-recommendation", text.to_string());
+                let body: String = text.chars().take(240).collect();
+                app.notification()
+                    .builder()
+                    .title("西西弗斯 · 周回顾")
+                    .body(body)
+                    .show()
+                    .is_ok()
+            }
+            Err(e) => {
+                eprintln!("[scheduler] weekly_review failed: {e}");
                 false
             }
         };

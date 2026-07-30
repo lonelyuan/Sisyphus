@@ -14,25 +14,148 @@
 
 ---
 
-## 进度快照（2026-07-15）
+## 进度快照（2026-07-30）
 
 Phase 0 / 1.0 / 1.1 / 1.2 / 1.3 的核心闭环均已落地并在本机跑通（Tauri v2 + Rust `sisyphus-core` + rmcp MCP + React/Tailwind 深色 UI）。逐项状态见各阶段勾选框。
 
 | 阶段 | 状态 | 一句话 |
 |---|---|---|
-| Phase 0 技术验证 | ✅（同步除外） | Tauri/SQLite/协议/`ingest_event`/MCP 全通；Supabase 同步延后至 Phase 2 |
-| 1.0 Core MVP | ✅ | capture→propose_intents→accept_intent→artifact；per-type 表 + `intent_candidates` 审计 |
-| 1.1 拖延干预 | ✅ 闭环 / ⏳ 真机验证 | macOS 采集器 + Android UsageStats(JNI，后台可弹) + 规则 + 通知 + 反馈；缺 outcome 观察、LLM 文案 |
-| 1.2 原声笔记 | ✅ | 收件箱 → Codex 分类 → accept/edit/ignore 落 artifact；不自建 UI，走 Codex |
-| 1.3 第二大脑 | ✅ 核心 | Obsidian vault(.md+`[[wikilink]]`) + `knowledge_notes` 索引 + Codex TS SDK 派发；缺关系判定/剪枝 |
+| Phase 0 技术验证 | ✅（同步除外） | Tauri/SQLite/协议/`ingest_event`/MCP 全通；**schema 迁移机制已补**（`user_version`）；Supabase 同步延后至 Phase 2 |
+| 1.0 Core MVP | ✅ | capture→propose_intents→accept_intent→artifact；意图种类扩到 6 类（含 life_item / rule，都进候选桥）|
+| 1.1 拖延干预 | ✅ 闭环 + ✅ outcome | macOS 采集器 + Android UsageStats + 动态规则 + 通知 + 反馈 + **近端结果观察**；LLM 文案待做 |
+| 1.2 原声笔记 | ✅ | 收件箱 → 分类 → accept/edit/ignore 落 artifact |
+| 1.3 第二大脑 | ✅ 核心 + ✅ 约束层 | Obsidian vault + 索引 + **写入器约束 + kb_doctor 体检 + 红链队列 + 结晶化归并** |
 
-**超出原 MVP 的额外落地**：感知平面 App 常驻（tray / 关窗不退 / 开机自启）、Codex 风深色 UI（今日 / 记录 / 设置 三页 + 目标·任务 CRUD）、监控名单跨端增删查改、Android 端可编译运行。
-
-**当前主线（2026-07-27 调整）**：LifeDB 自建结构化人生看板 + Notion 普通文本双向投影。见 [spec/notion-integration.md](spec/notion-integration.md)。
+**当前主线（2026-07-30 调整）**：把三个模块的**不变量从 prompt 搬进代码**，并为技能树 / 无极时间线打好存储底座。见下方「2026-07-30 全面评审与整改」。
 
 > **kill-criteria 已废弃（2026-07-20 用户决定）**：原以"连续 5 天通知未改变行为→证明无效"当 kill 门。用户判断该门逻辑上无法证伪（永远可归因于"实现不够好"），既不能证伪 idea、反而拖着不敢往下做。故不再当验证门槛，改当**持续打磨的实现质量问题**。"主动提醒能改变行为"作为项目公理，实现形态（宠物/系统通知/遮罩/对话）持续迭代。
+>
+> 但**近端结果观察不是 kill 门，是学习信号**——已于 2026-07-30 补上（见下）。没有它，阈值只能靠感觉调，Phase 2.1 的可学习策略也没有 label 可学。
 
 ---
+
+## 2026-07-30 全面评审与整改
+
+一次覆盖文档 / 代码 / 真实数据的评审。**共同结论：三个模块的规则本身基本正确，但全部只写在 prompt 与 spec 里，没有一条能被拒绝、被测量、被反馈。** 整改的主线因此不是加新架构，而是把约束搬进写入路径，并补上能算指标的体检工具。
+
+### 评审时实测到的问题（全部有数据）
+
+**知识库（对真实 vault 的 98 个 md 做图分析）**
+
+| 问题 | 实测 | 根因 |
+|---|---|---|
+| wikilink 断链 | **63/354 = 18%** | `vault::slugify` 把标题里的空格换成 `-`（`AD CS` → `ad-cs.md`），而 `## 关联` 按**标题**渲染 `[[AD CS]]`。Obsidian 按**文件名**解析，不看 frontmatter 的 `title` → 任何含空格/标点的标题，其入链必然点不开。57/63 都是这一个原因 |
+| 同一张卡两份 | `certighost` 在 `kb/…` 与 `…`（漏 `kb/` 前缀）各一份，内容已分叉 | `write_knowledge_note` 幂等键是 **path** 而不是 title；`folder` 无任何校验，MCP 工具描述还写着"省略则落 vault 根"，与 SKILL.md 的"一律 kb/ 开头"直接冲突 |
+| 查重查不到 | — | `search_knowledge` 只 LIKE 标题/标签/路径，**不搜正文**。SKILL.md 要求"按主题查重"在工具层根本做不到 → 只能新建 → 碎片化 |
+| 读不回来 | — | MCP **没有读卡工具**，而 types.md 要求"更新前必须先读回现有卡"。整卡覆盖 = 静默丢内容 |
+| 标签缺失 | 缺 type 5 张、缺可靠性 8 张、1 张写成字面 `#待确认` | 无校验 |
+| 目录超阈值 | identity-system 22 张、network-infra 18 张（阈值 12） | 无体检工具，agent 无法在上下文里可靠统计图结构 |
+| 孤儿卡 | 入度为 0 共 6 张 | 同上 |
+| 删卡留断链 | `[[游泳知识库]]` 等 | `delete_note` 不改入链，也无重定向机制 |
+
+**反拖延**
+
+- **通知风暴（最高优先）**：冷却读 `interventions.shown_at`，但只有 `Immediate` 策略写这张表；`Deferred`/`Debounce` 只入队。于是这两种策略下冷却永远 ready，采集器每 5–15s 就重新入队一条——一条 10 分钟延迟的规则会攒出几十条通知同时炸出来。而 skill 与工具描述都把 `deferred` 当可用选项推荐。
+- `Debounce` 的 `window_ms` 被整个丢弃（`window_ms: _`），去重只靠"队列里还有 pending"，派发完就又能入队 → 退化成每 30 秒响一次。
+- `RuleEngine::evaluate` 返回**第一个**命中且内置规则永远排在前面 → 用户精心建的规则可能永远不触发。
+- `interventions.outcome` 列建表就在，**从未回填**。
+- 长时间停在同一个 app 时**一条事件都不写**（只在切换前台时才落盘）——看两小时电影 = Event log 空白。
+
+**人生看板**
+
+- 同一件"要做的事"存在三张表：`tasks`（accept_intent 写、today_actions 读）、`life_items`（看板读写）、`lifeindex_cards`（遗留）。同步只有 `tasks → life_items` 单向且不完整。用户可感知的后果：助手记下的待办要等 App 重启才出现在看板；在看板里做完一件事，第二天早上仍会被提醒做它。
+- 缺 GTD 的**责任领域**（Horizon 3）一层，于是 `track=main|side` 只能一条条手标——这是"手动维护不丝滑"的主要来源。
+- `goal` 无可判定完成条件 → 永远无法收敛；`review_at_ms` 字段在但无人读写 → idea 没有毕业机制。
+- `today_actions` 是"目标 + 前 3 个未完成任务（按手填 priority）"，与"永远知道下一步"的承诺不匹配，且不可解释。
+- Notion 整页 replace 是唯一不可逆的一步；`life_sync_runs` 一直在存写回前全文，但**没有任何读取入口**。
+
+**地基**
+
+- **无 schema 迁移机制**：只有 `CREATE TABLE IF NOT EXISTS`，加列不生效 → 下次给已有表加字段，所有已装机的库会报 `no such column`。
+- **时区口径分裂**："今天"用 UTC 日期算，而 `time_of_day` / `daily@HH:MM` 用本地时区 → UTC+8 用户的日界落在**早上 8 点**。
+- **并发静默丢事件**：`seq_no = MAX+1` + `UNIQUE(device_id,seq_no)` + `INSERT OR IGNORE`，两个同 device_id 的写入者并发时后一条被吞掉，却照样返回一个库里不存在的 event_id（Pi 与 Codex 的 MCP 都用 `agent-mcp`）。
+- `ingest_event` **不校验**任何东西（架构文档写着"校验信封与 privacy_level"，实现是纯透传）；`category` 列混用了行为分类与 capture 种类两套命名空间。
+- 文档漂移与重复：`knowledge-engine-design.md` 与 `references/knownengine-design.md` 是同一份 1758 行（仅差 8 行 banner）；`agent.md` 的 LifeIndex 模式仍写 `upsert_lifeindex_card`；`rule-engine.md` 写的规则引擎路径已过时。
+
+### 已整改（本轮全部落地，测试 36 → 71 通过）
+
+**地基**
+- [x] `core::migrations`：`PRAGMA user_version` + 幂等迁移数组（补列 / 重建 `life_items` 放宽 kind / 旧表一次性导入 / 知识卡标题去重 + 部分唯一索引 / 播种默认领域），含"老库形状 → 迁移 → 数据完好"测试。
+- [x] `core::clock`：全系统唯一的"一天"定义（本地时区 + 可配置换日点，默认 0 点，可设 4 点适合夜猫子）。`context` / `collector` / `commands` / `android_jni` 全部改走它。
+- [x] `core::settings`：Core 行为开关的 KV（换日点等）；凭据仍不进 SQLite。
+- [x] `ingest_event` 变成闸门：枚举白名单 + interval 必须有 start/end + end≥start + privacy_level 校验，脏事件拒绝入库。素材改用独立 `type=material_text`，不再污染 `category` 命名空间。
+- [x] `seq_no` 改 `device_seq` 计数器表单语句原子自增；`insert_behavior_event` 若没插进去且 event_id 不在库里则**报错**而不是假装成功。
+
+**反拖延**
+- [x] 新增 `rule_fires` 事实表：**命中当拍就记**，与"通知有没有真的弹"无关。冷却与 debounce 窗口只看它 → 通知风暴消除；`Suppress` 也记痕（推进冷却）。
+- [x] `Debounce.window_ms` 真的生效（`db::debounced_recently`）。
+- [x] `RuleEngine::evaluate` 改为跑全部规则、按 severity 取最高，同级时**动态规则优先**于内置。
+- [x] 延后派发的文案改为投递前重算（不含"此刻已刷 N 分钟"这类会过期的数字）。
+- [x] **近端结果观察闭环**：干预弹出即入队 `observe_outcome`（+10min / +30min）→ ticker 到点算窗口内娱乐占比 → 回填 `outcome`（still_entertainment / mixed / switched / unknown，没观测就是 unknown，不编）→ `intervention::outcome_stats` 给"转移率"。MCP/Tauri 都能读。
+- [x] 采集器每 5 分钟落一个闭合切片，长时间停在同一 app 不再是 Event log 空白（Event log 仍是 append-only，不改历史事件）。
+
+**知识工程（约束层）**
+- [x] 文件名 = 标题（只替换文件系统非法字符），不再 slugify；`aliases` 进 frontmatter 做重定向。**已对真实 vault 执行迁移：断链 18% → 1.1%**（剩 4 条是真正还不存在的卡，现在作为红链进调研队列）。迁移前后各有 git 快照。
+- [x] 幂等键改为 **title**；同标题换 folder = 移动而不是复制；`knowledge_notes.title` 存活行部分唯一索引。重复的 `certighost` 已合并（保留内容更全的版本）。
+- [x] 写入校验：`folder` 必须 `kb/` 开头、标题长度上限、tags 恰好一个类型 + 一个可靠性档、`links` 至少一条（MOC 豁免）、**`已复现`/`已验证` 必须有 sources**（"模型自身知识只配待确认"从提示变成约束）。
+- [x] `search_knowledge` 搜正文并返回片段（碎片化的机械原因消除）。
+- [x] `read_knowledge_note` + `append_section`（补充式增长成为原子操作）+ `merge_notes`（留别名、改入链、删碎卡，不留断链）。
+- [x] `kb_doctor`：断链/断链率、孤儿、无出链、重复、缺标签、无据高档、领域拆并建议、同前缀碎卡簇、MOC 目录漂移、散落文件、未被引用的原文。`rebalance`/`defragment` 从"靠感觉扫"变成"跑 lint → 修 top N"。
+- [x] `kb_wanted` 红链队列 = **主动调研的输入**（三场景闭环：①留红链 → ③按热度深研 → ①补齐）。
+- [x] `reindex_vault`：vault 的 `.md` 是本体、索引是可重建投影；启动时追平，吸收用户在 Obsidian 里的手改/移动/删除。
+- [x] vault 自动 `git init` + 每次写入后快照：整卡覆盖从"不可逆"变成"可 diff 可回滚"，顺带得到版本历史。
+
+**人生看板 / LifeDB**
+- [x] `life_areas`（GTD Horizon 3 责任领域，播种 6 个默认领域）+ `life_items.area_id`。
+- [x] `success_criteria` / `target_value` / `current_value` / `unit`：完成可判定，进度可算。
+- [x] `tasks` 收敛：`accept_intent(kind=task)` 直接写 `life_items`（kind=action），`query_context.open_items` / `today_actions` 全部改读 LifeDB。看板与今日视图第一次一致。
+- [x] `lifetree::next_actions`：确定性 + **每条带理由**（逾期 → 已排在当下 → 临近截止 → 主线/重点领域下最浅的未完成 → 今日日常 → 候选 → 待安排兜底，不因过滤丢失）。
+- [x] `lifetree::review_queue`：周回顾要问的问题由 SQL/Rust 算好（到期审查 / 停滞 / 未拆解 / 缺完成条件 / 滞留 inbox），agent 只负责问与措辞；每天 20:10 的 job 只在周日发问。
+- [x] `list_sync_runs` + `sync_run_remote_before`：Notion 整页替换终于有了恢复入口。
+
+**无极时间线**
+- [x] `time_rollups` 预聚合桶（day/week/month）+ `rollup_state` 水位增量重建 + 读路径自愈追平。年尺度代价从 O(事件数) 降为 O(可见桶数)。跨午夜会话按逻辑日拆分，周/月桶由日桶再聚合（三尺度口径一致）。
+- [x] 事件显著性等级 `lod_level`：粗尺度按**重要性**保留图层，不再"按表顺序截断"。
+- [x] 补上缺失的**长期计划图层**：LifeDB 的目标/项目/技能跨度 + 里程碑点，进度用技能树同一套算法（`has_long_term_source` 不再硬编码 false）。
+
+**知识工程二轮（同日追加，起因：用户反馈"sources 一大坨没人看"+"图谱里全是 index 占位符"）**
+- [x] **原始材料从物理隔离改为元信息隔离**：`sources/` 目录取消，原文**就地存放在它讲的那个话题的
+  文件夹里**；隔离靠 `type: source` + **单向连接**（卡片/枢纽 → 原文，原文自己不出链，工具层会拒绝有出链的 source）
+  + `publish: false`（博客按此排除，**不能再按路径排除**）。质量门槛：外部原文必须有 url，
+  目录/索引类快照直接拒收。
+- [x] 真实 vault 迁移：9 份高价值原文按引用关系/内容归位话题夹；**删 11 份 KM 副本**
+  （3 份目录快照共 2220 行纯链接 + 6 份可直接开 URL 的单篇 + README），引用侧改为直接引用 KM 链接
+  ——这正是项目自己"第一方成品只链接不复制"规则要求的；根目录散落文件也归位。
+- [x] **图谱能看出层级**（Obsidian 图谱**不渲染文件夹节点**，节点标签用文件名）：
+  9 个 `index.md` 改名为领域名（`网络与基础设施`/`Web 安全`…）；新增 `hub` **角色**标记
+  （`moc` 只是类型，一个领域可以有多张概念地图卡——早先按"路径最短的 moc"猜，把自动目录写进了
+  「安全基建」）；父子枢纽互链成脊椎；`refresh_mocs` **确定性生成**子领域/卡片/原始材料清单
+  （marker 之外的领域叙述原样保留）；`graph.json` 配 9 组按 `path`/`tag` 上色 + 打开箭头。
+- [x] 修 `extract_wikilinks`：跳过围栏代码块与行内代码——文档里写 `` `[[链接]]` `` 讲语法
+  不再被误判成永远补不上的假红链。
+- [x] 迁移后体检：**断链 1%（3 条真缺口）· 孤儿 0 · 目录漂移 0 · 散落文件 0 · 无人引用的原文 0
+  · 违反单向的原文 0 · 缺类型 0 · 缺可靠性 0 · 无据高档 0**。
+
+**文档**
+- [x] 删掉重复的 1758 行设计文档；修正 `agent.md` / `rule-engine.md` / `local-storage.md` / `notion-integration.md` / `proactive-triggers.md` / `architecture.md` 的漂移；更新 skills 契约与 MCP instructions。
+
+### 尚未做（明确留白，不假装完成）
+
+- [ ] **技能树与无极时间线的前端**：后端数据（`life_tree` / `bands` / `plans` / `level`）已就绪且有类型定义，画布渲染是下一步的 UI 工作。
+- [ ] **意图分类 golden set**：30–50 条固定用例（句子 → 期望 kind + 字段），换基座/改 prompt 后跑一遍看漂移。目前换 Pi ↔ Codex 是盲飞。
+- [ ] LLM 生成干预文案（现为确定性模板 + 真实数据引用）。
+- [ ] 浏览器插件（桌面最大信号缺口：真正的刷视频在浏览器内）。
+- [ ] Notion 改为只替换 marker 区块（现在是整页替换，会打乱用户排版）。
+- [ ] 知识库 FTS5（现为 LIKE 正文检索；个人库规模够用，不引入新依赖）。
+- [ ] **领域拆分**：`network-infra` 16 张、`identity-system` 21 张都超过 12 的阈值（体检已报 split）。
+  拆法需要语义判断（如 identity-system 可拆 证书/域/SSO-MFA 三支），留给一次 rebalance 例程。
+- [ ] **碎卡簇 8 组**待评估（`证书基础/证书注册/证书映射加固`、`ESC/ESC1/ESC1 环境边界` 等）——
+  过双筛后该并的并，需要读内容判断，不宜机械合并。
+- [ ] 接 Quartz 时验证：枢纽不再叫 `index.md`，栏目落地页要么靠自动生成、要么显式配置。
+- [ ] `move_note` 工具（现由 `write_knowledge_note` 换 folder 时自动移动覆盖）。
+
+---
+
 
 ## 总体架构心智模型
 
@@ -55,8 +178,8 @@ Phase 0 / 1.0 / 1.1 / 1.2 / 1.3 的核心闭环均已落地并在本机跑通（
 | 模块 | 目标 | 核心闭环 |
 |---|---|---|
 | 总入口 · InputBox + 意图识别（原 1.2 原声笔记） | 无压记录 + 功能路由 | 任意输入 → `capture` → 意图识别 → 路由到下面三模块 |
-| 1.1 西西弗斯计划（狭义） | 低效习惯与拖延的数字干预 | 行为采集 → 风险识别 → Agent 干预 → 用户反馈 → 近端结果 |
-| LifeIndex · 人生看板 | 低摩擦记录 + 严格结构化展示 | Notion 自由文本 ↔ Agent 三方语义合并 ↔ SQLite LifeDB → App 四个重叠视图（见 [spec/notion-integration.md](spec/notion-integration.md)） |
+| 1.1 西西弗斯计划（狭义） | 低效习惯与拖延的数字干预 | 行为采集 → 风险识别 → Agent 干预 → 用户反馈 → **近端结果** |
+| LifeIndex · 人生看板 | 低摩擦记录 + 严格结构化展示 + **心智系统**（技能树 / 无极时间线）| Notion 自由文本 ↔ Agent 三方语义合并 ↔ SQLite LifeDB → App 视图（见 [spec/notion-integration.md](spec/notion-integration.md)、[spec/lifeindex-mind-system.md](spec/lifeindex-mind-system.md)）|
 | 1.3 第二大脑 | 和人一同进化的知识工程 | 原始材料/目标 → 学习加工 → 知识库(vault)/知识图谱 → 可读输出/教学 |
 
 ### 统一入口
@@ -325,24 +448,39 @@ MVP 范围：
 - **批次 G ✅ 已落地（同日追加）** — 排查"智能体没权限"发现两个根因并修复：① `pi-agent-runtime.mjs` 的 `DefaultResourceLoader` 会自动加载项目/全局 `.pi/extensions/pi-permission-system`（给交互终端 UI 写的扩展），在我们的 headless 子进程里对每次工具调用返回"需要审批但无 UI"而拒绝——加 `noExtensions: true` 跳过；② SDK 文档说 `noTools:"builtin"` 会保留 custom tools，但实现里未提供 `tools` 允许名单时不会激活它们——改为显式 `tools: sisyphusTools.map(t=>t.name)`。顺带接入 Notion 只读集成：官方 `@notionhq/notion-mcp-server`，Pi 侧多开一个 MCP client 合并工具面、Codex 侧用 `-c mcp_servers.notion.*` 注入，token 存 `notion_config.json`（0600）+ Settings 新卡片；只读边界由 Notion 侧 integration 权限（仅 "Read content"）机制保证。`AgentScreen` 会话删除失效（`window.confirm` 在 Tauri webview 里常返回 false）一并修复。详见 `docs/spec/notion-integration.md` §8"现状"小节。
 - **批次 H ✅ 已落地（2026-07-27）** — LifeDB / LifeItem / LifeIndex：SQLite 新增统一人生规划对象、关系、外部引用和三方合并快照；旧 tasks/LifeIndex 卡片幂等迁入。MCP/Tauri 增加 LifeItem CRUD、关系、投影和同步完成 API；Pi/Codex 新增 `LifeIndexSync` 白名单模式。Notion 改为固定单页受限网关，只暴露整页 Markdown 读/替换；每日 8:30 入站、本地修改后即时出站、App 手动同步。看板 UI 重构为事项/日常/主线/支线四个重叠视图 + 待整理，并可完整编辑字段。详见 `docs/spec/notion-integration.md`。
 
-### 主线：LifeDB + Notion 文本投影闭环（已完成首版）
+### 主线：LifeIndex 从「看板」升级为「心智系统」
 
-心智模型见 [spec/notion-integration.md](spec/notion-integration.md)：**LifeDB 是事实源，App 是严格视图，Notion 是自由文本交互层，Agent 是语义编译器。**
+心智模型见 [spec/notion-integration.md](spec/notion-integration.md)（**LifeDB 是事实源，App 是严格视图，Notion 是自由文本交互层，Agent 是语义编译器**）与 [spec/lifeindex-mind-system.md](spec/lifeindex-mind-system.md)（技能树 / 无极时间线的底座与理论依据）。
 
-1. **已完成：LifeDB 数据模型**：五种 kind + track + horizon + 状态/时间/循环 + 邻接关系。
-2. **已完成：受限双向同步**：三方快照、乐观 revision、固定单页网关、失败审计和并发保护。
-3. **已完成：App 四视图**：事项/日常按形态，主线/支线按意义，允许同一项重叠展示。
-4. **下一步：同步实测与恢复 UI**：用真实 LifeIndex 页面覆盖首次导入、并发编辑、删除冲突、Notion 限流和子页面保护；为 conflict 提供显式人工合并入口。
+1. **已完成：LifeDB 数据模型**：七种 kind（+skill/milestone）+ area + track + horizon + 可判定完成条件与度量 + 邻接关系。
+2. **已完成：受限双向同步**：三方快照、乐观 revision、固定单页网关、失败审计、并发保护、**恢复入口**。
+3. **已完成：确定性心智服务**：`life_tree`（技能树 + 进度）、`next_actions`（带理由的下一步）、`review_queue`（周回顾要问什么）。
+4. **已完成：无极时间线底座**：预聚合桶 + 显著性分层 + 长期计划图层。
+5. **下一步：两个组件的前端**——技能树画布（节点 + 前置边 + 进度环）与无极时间线渲染（条带 + 计划跨度 + LOD 标记）。后端数据与类型都已就绪。
+6. **再下一步：同步实测**：用真实 LifeIndex 页面覆盖首次导入、并发编辑、删除冲突、Notion 限流和子页面保护。
+
+### 技能树 · 无极时间线（**规划中的重要组件，不是暂缓项**）
+
+两者都是心智系统的一部分，靠底座支撑而非前端糖。存储底座已在 2026-07-30 落地，设计与不变量见 [spec/lifeindex-mind-system.md](spec/lifeindex-mind-system.md)。
+
+**技能树**：目标 → 自动生成里程碑 → 与日程联动。
+- 已有底座：`kind=skill|milestone`；`contains` 边表达等级/阶段分解，`depends_on` 边表达前置能力（DAG）；`success_criteria` + `target_value`/`current_value`/`unit` 让"完成"可判定；`lifetree::forest/subtree` 给出**Core 确定性算出的进度**（叶子看状态或度量，内部节点等权平均），进度绝不由 agent 估。
+- 待做：① 前端画布；② "目标 → 里程碑"的生成例程（agent 产出候选 milestone，走 `life_item` 意图候选桥，用户确认后落库——保持可回滚）；③ 里程碑到期进 `next_actions` 与提醒队列（已通过 `due_at_ms` 天然联动）。
+
+**无极时间线**：无限伸缩，不同尺度显示不同抽象层次，给用户对时间利用率的掌控感。
+- 已有底座：`time_rollups`（day/week/month 预聚合 + 水位增量重建 + 读路径自愈）让缩放代价与事件量解耦；`lod_level` 让粗尺度按**重要性**保留图层；`plans` 图层把长期计划画进时间轴；`bands` 给出每桶的专注/娱乐/中性拆分与主导分类。
+- 待做：① 画布渲染（条带 + 计划跨度 + 里程碑标记 + 连续 zoom 手势）；② 时间利用率视图（周/月对比、目标达成与娱乐占比的关系）；③ app 维度条带（数据已在 rollup 的 `dimension='app'`）。
 
 ### 让闭环真正有用的小补丁（按性价比排序，都不需新架构）
 
-1. **近端结果 outcome 观察**（1.1 缺口）：干预/提醒后 10 / 30 min 回看前台在干嘛，回填 `interventions.outcome`。把"感觉有没有用"变成"数据说话"。采集器 tick 里加一步即可。
+1. ~~近端结果 outcome 观察~~ ✅ 已落地（2026-07-30）。
 2. **浏览器插件**（桌面最大信号缺口）：`packages/browser-extension` 已有骨架。桌面真正的刷视频在浏览器内、原生 app 白名单抓不到。接一个 tab/URL → `ingest_event(url_visit)` 的最小插件。
-3. **LLM 生成干预文案**：现为 Rust 确定性模板。让反思平面（Codex）在冷却窗口预生成几条个性化文案缓存，命中时取用——引擎实时触发 + Agent 措辞温度。
+3. **LLM 生成干预文案**：现为 Rust 确定性模板（引用真实时长与目标）。让反思平面在冷却窗口预生成几条个性化文案缓存，命中时取用——引擎实时触发 + Agent 措辞温度。
+4. **意图分类 golden set**：30–50 条固定用例存进仓库，换基座/改 prompt 后跑一遍。成本一个下午，换掉"盲飞"。
 
 ### 之后（Phase 2，明确延后）
 
-Supabase 同步 / 跨端联合分析、可学习策略（contextual bandit / 离线策略评估）、知识关系判定与剪枝、自研 Agent 基座、多用户安全边界。
+Supabase 同步 / 跨端联合分析、可学习策略（contextual bandit / 离线策略评估 —— 现在 outcome 已在产生 label，条件第一次具备）、自研 Agent 基座、多用户安全边界、知识库 FTS5 与向量检索、CTF 沙箱验证器。
 
 ### 对拖延症开发者的推进纪律（不变）
 

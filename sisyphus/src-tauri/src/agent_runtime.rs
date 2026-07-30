@@ -12,9 +12,9 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
+use sisyphus_core::app_config::{LlmConfig, NotionConfig};
 
 const CONFIG_FILE: &str = "agent_runtime.json";
-const LLM_CONFIG_FILE: &str = "llm_config.json";
 
 #[derive(Default)]
 struct ActiveRuns {
@@ -224,19 +224,14 @@ pub struct AgentRunOutput {
     pub elapsed_ms: u128,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-struct PiLlmConfig {
-    #[serde(default)]
-    format: String,
-    #[serde(default)]
-    base_url: String,
-    #[serde(default)]
-    model: String,
-    #[serde(default)]
-    api_key: String,
+/// `LlmConfig` 的 runtime 专属派生逻辑（schema 本体在 `sisyphus_core::app_config`，
+/// 与 Tauri commands 共用，避免两处字段定义失配）。
+trait LlmConfigExt {
+    fn api_key(&self) -> String;
+    fn ready(&self) -> bool;
 }
 
-impl PiLlmConfig {
+impl LlmConfigExt for LlmConfig {
     fn api_key(&self) -> String {
         if self.api_key.trim().is_empty() {
             std::env::var("SISYPHUS_LLM_API_KEY").unwrap_or_default()
@@ -586,35 +581,12 @@ fn runtime_info(id: &str, path: Option<PathBuf>) -> RuntimeInfo {
     }
 }
 
-fn read_pi_llm_config(data_dir: &Path) -> PiLlmConfig {
-    std::fs::read_to_string(data_dir.join(LLM_CONFIG_FILE))
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
+fn read_pi_llm_config(data_dir: &Path) -> LlmConfig {
+    sisyphus_core::app_config::read_llm_config(data_dir)
 }
 
-const NOTION_CONFIG_FILE: &str = "notion_config.json";
-
-#[derive(Debug, Default, Deserialize)]
-struct NotionConfigFile {
-    #[serde(default)]
-    token: String,
-    #[serde(default)]
-    page_id: String,
-    #[serde(default)]
-    sync_enabled: bool,
-}
-
-fn read_notion_config(data_dir: &Path) -> NotionConfigFile {
-    let cfg: NotionConfigFile = std::fs::read_to_string(data_dir.join(NOTION_CONFIG_FILE))
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
-    cfg
-}
-
-fn read_notion_connection(data_dir: &Path) -> Option<NotionConfigFile> {
-    let mut cfg = read_notion_config(data_dir);
+fn read_notion_connection(data_dir: &Path) -> Option<NotionConfig> {
+    let mut cfg = sisyphus_core::app_config::read_notion_config(data_dir);
     cfg.token = cfg.token.trim().to_string();
     cfg.page_id = cfg.page_id.trim().to_string();
     (cfg.sync_enabled && !cfg.token.is_empty() && !cfg.page_id.is_empty()).then_some(cfg)

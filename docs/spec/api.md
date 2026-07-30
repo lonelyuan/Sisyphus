@@ -182,3 +182,29 @@
 - **新增 App 命令**：在 `commands.rs`（或 `lib.rs`）加 `#[tauri::command]` + 注册进 `generate_handler![]` → 更新 §2 与 §3。
 - 二者都应经 `sisyphus-core` 落库（守唯一事实来源）；`tokio`/`rmcp`/进程/通知只在 mcp 或 app 层，**绝不进 core**（安卓构建铁律）。
 - 本文件为手工维护的真相；MCP 侧可随时用 `tools/list` 交叉核对参数 schema。
+
+---
+
+## 2026-07-30 变更（工具面）
+
+**新增（只读）**：`read_knowledge_note` · `kb_doctor` · `kb_wanted` · `life_tree` · `next_actions` ·
+`review_queue` · `list_life_areas` · `intervention_outcomes` · `list_lifeindex_runs` · `lifeindex_rollback_text`
+
+**新增（写）**：`append_knowledge_section`（结晶化的默认写入路径）· `merge_knowledge_notes` ·
+`kb_reindex` · `upsert_life_area`
+
+**契约变更**：
+- `write_knowledge_note.folder` 由可选变为**必填且必须以 `kb/` 开头**；新增 `aliases`；
+  写入前校验 tags（恰好一个类型 + 一个可靠性档）、`links`（≥1，MOC 豁免）、高可靠性档必须有 `sources`。
+  幂等键由 `path` 改为 **`title`**。
+- `search_knowledge` 检索**含正文**，返回 `{title,path,folder,tags,excerpt,updated_at}`。
+- `query_context` 的 `open_tasks` → **`open_items`**（LifeItem 全字段），新增 `next_actions`；
+  `recent_interventions` 增加 `outcome`；`date` 是本地逻辑日。
+- `propose_intents` 的 `kind` 增加 **`life_item`** 与 **`rule`**。
+- `upsert_life_item` 的 `kind` 增加 `skill` / `milestone`；新增 `area_id` / `success_criteria` /
+  `target_value` / `current_value` / `unit`。
+- `query_timeline` 返回新增 `bucket` / `bands` / `plans`，`events[]` 增加 `level`（显著性等级）。
+
+**Tauri 命令**同步新增：`kb_doctor` / `kb_wanted` / `kb_reindex` / `life_tree` / `next_actions` /
+`review_queue` / `list_life_areas` / `upsert_life_area` / `intervention_outcomes` / `rebuild_rollups` /
+`set_day_boundary_hour` / `get_day_boundary_hour` / `list_lifeindex_runs`。

@@ -1,29 +1,28 @@
 //! 反思平面读模型：今日上下文、今日行动、目标与反馈写入。
 //! App 命令与 MCP 工具都调用这里，保证逻辑单一来源。
+//!
+//! 两处已修正的口径问题：
+//! 1. **"今天"的定义**统一走 [`crate::clock`]（本地时区 + 换日点），不再用 UTC 日期
+//!    ——UTC+8 用户此前的日界落在早上 8 点。
+//! 2. **未完成事项的来源**统一为 `life_items`（LifeDB 是事实源），不再读 `tasks`。
+//!    此前看板写 `life_items`、今日上下文读 `tasks`，在看板里做完一件事，
+//!    第二天早上仍会被提醒做它。
 
 use rusqlite::{params, Connection};
 use serde::Serialize;
 use uuid::Uuid;
+
+use crate::clock;
 use crate::db;
+use crate::lifedb::LifeItem;
+use crate::lifetree::{self, NextAction};
 use crate::rule_engine::DailyGoal;
-
-fn today_str() -> String {
-    chrono::Utc::now().format("%Y-%m-%d").to_string()
-}
-
-fn today_start_ms() -> i64 {
-    let now = chrono::Utc::now();
-    now.date_naive()
-        .and_hms_opt(0, 0, 0)
-        .unwrap()
-        .and_utc()
-        .timestamp_millis()
-}
 
 #[derive(Debug, Serialize)]
 pub struct RecentIntervention {
     pub shown_at: i64,
     pub response: Option<String>,
+    pub outcome: Option<String>,
 }
 
 /// 今日上下文（只含 L0–L1 数据），供 Agent `query_context` 构建最小必要上下文。
@@ -34,22 +33,26 @@ pub struct TodayContext {
     pub entertainment_minutes: f64,
     pub intervention_count: i64,
     pub recent_interventions: Vec<RecentIntervention>,
-    /// 未完成任务（todo/doing），供规划/复盘引用（Phase 1.2）。
-    pub open_tasks: Vec<crate::artifacts::Task>,
+    /// 未完成的人生事项（LifeDB 事实源：action / milestone / routine）。
+    pub open_items: Vec<LifeItem>,
+    /// 确定性选出的今日最小行动，**带理由**（见 [`lifetree::next_actions`]）。
+    pub next_actions: Vec<NextAction>,
     /// 已到期未处理的提醒（被动：由 Agent 在规划时提及）。
     pub due_reminders: Vec<crate::artifacts::Reminder>,
 }
 
 pub fn today_context(conn: &Connection, user_id: &str) -> rusqlite::Result<TodayContext> {
-    let today = today_str();
-    let date_start = today_start_ms();
+    let boundary = clock::boundary_hour(conn);
+    let now = clock::now_ms();
+    let today = clock::day_str_at(now, boundary);
+    let date_start = clock::day_start_at(now, boundary);
 
     let goal = db::get_today_goal(conn, &today)?;
     let entertainment_ms = db::today_entertainment_ms(conn, user_id, date_start)?;
     let intervention_count = db::today_intervention_count(conn, date_start)?;
 
     let mut stmt = conn.prepare(
-        "SELECT shown_at, user_response FROM interventions
+        "SELECT shown_at, user_response, outcome FROM interventions
          WHERE shown_at >= ?1 ORDER BY shown_at DESC LIMIT 5",
     )?;
     let recent = stmt
@@ -57,13 +60,14 @@ pub fn today_context(conn: &Connection, user_id: &str) -> rusqlite::Result<Today
             Ok(RecentIntervention {
                 shown_at: r.get(0)?,
                 response: r.get(1)?,
+                outcome: r.get(2)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
-    let open_tasks = crate::artifacts::list_open_tasks(conn)?;
-    let due_reminders =
-        crate::artifacts::list_due_reminders(conn, chrono::Utc::now().timestamp_millis())?;
+    let open_items = list_open_items(conn).unwrap_or_default();
+    let next_actions = lifetree::next_actions(conn, 3).unwrap_or_default();
+    let due_reminders = crate::artifacts::list_due_reminders(conn, now)?;
 
     Ok(TodayContext {
         date: today,
@@ -71,25 +75,37 @@ pub fn today_context(conn: &Connection, user_id: &str) -> rusqlite::Result<Today
         entertainment_minutes: entertainment_ms as f64 / 60_000.0,
         intervention_count,
         recent_interventions: recent,
-        open_tasks,
+        open_items,
+        next_actions,
         due_reminders,
     })
 }
 
-/// 今日最小行动（MVP）：优先返回今日目标，再补未完成任务（合并去重后至多 3 条）。
-/// 后续升级为策略选择（多目标里选 1–3 个）。
+/// 未完成的可执行事项（LifeDB）：action / milestone / routine，未 done/archived。
+pub fn list_open_items(conn: &Connection) -> Result<Vec<LifeItem>, String> {
+    Ok(crate::lifedb::list_items(conn, false)?
+        .into_iter()
+        .filter(|i| {
+            matches!(i.kind.as_str(), "action" | "milestone" | "routine")
+                && !matches!(i.status.as_str(), "done" | "archived")
+        })
+        .collect())
+}
+
+/// 今日最小行动（1–3 条文本，向后兼容的窄接口）。
+/// 需要理由/结构时用 [`lifetree::next_actions`] 或 `today_context().next_actions`。
 pub fn today_actions(conn: &Connection) -> rusqlite::Result<Vec<String>> {
-    let today = today_str();
+    let today = clock::today_str(conn);
     let mut actions: Vec<String> = Vec::new();
     if let Some(g) = db::get_today_goal(conn, &today)? {
         actions.push(g.raw_text);
     }
-    for t in crate::artifacts::list_open_tasks(conn)? {
+    for a in lifetree::next_actions(conn, 3).unwrap_or_default() {
         if actions.len() >= 3 {
             break;
         }
-        if !actions.contains(&t.title) {
-            actions.push(t.title);
+        if !actions.contains(&a.title) {
+            actions.push(a.title);
         }
     }
     Ok(actions)
@@ -97,17 +113,16 @@ pub fn today_actions(conn: &Connection) -> rusqlite::Result<Vec<String>> {
 
 /// 设置今日目标（同一天复用 id，重复调用视为修改文本并重置为 planned）。返回 goal id。
 pub fn set_goal(conn: &Connection, text: &str) -> rusqlite::Result<String> {
-    let today = today_str();
+    let today = clock::today_str(conn);
     let existing = db::get_today_goal(conn, &today)?;
     let id = existing
         .map(|g| g.id)
         .unwrap_or_else(|| Uuid::new_v4().to_string());
-    let now_ms = chrono::Utc::now().timestamp_millis();
     conn.execute(
         "INSERT INTO daily_goals (id, date, raw_text, status, created_at)
          VALUES (?1, ?2, ?3, 'planned', ?4)
          ON CONFLICT(id) DO UPDATE SET raw_text = excluded.raw_text, status = 'planned'",
-        params![id, today, text, now_ms],
+        params![id, today, text, clock::now_ms()],
     )?;
     Ok(id)
 }
@@ -120,7 +135,7 @@ pub fn record_feedback(
 ) -> rusqlite::Result<()> {
     db::update_intervention_response(conn, intervention_id, action)?;
     if action == "start_task" || action == "abandon_today" {
-        let today = today_str();
+        let today = clock::today_str(conn);
         if let Some(goal) = db::get_today_goal(conn, &today)? {
             let new_status = if action == "start_task" {
                 "started"

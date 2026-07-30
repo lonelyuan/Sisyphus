@@ -1,6 +1,6 @@
 # Spec: 规则引擎
 
-规则引擎运行在 **Rust 侧**（`sisyphus/src-tauri/src/rule_engine/`），由 ForegroundService（Android）或定时器（Desktop）每 10s 调用一次。它是**感知平面**的一部分，本地常驻、确定性、实时（见 [architecture.md](architecture.md) §1.1）。
+规则引擎运行在 **Rust 侧**（`sisyphus/src-tauri/crates/core/src/rule_engine/`），由 ForegroundService（Android）或采集器（Desktop，debug 5s / release 15s）调用。它是**感知平面**的一部分，本地常驻、确定性、实时（见 [architecture.md](architecture.md) §1.1）。
 
 值钱逻辑只写一份，两端共用同一 Rust 代码。
 
@@ -65,19 +65,44 @@ impl RuleEngine {
 
 ---
 
-## CooldownStore
-
-用 SQLite `interventions` 表查询上次触发时间，避免额外状态存储：
+## CooldownStore —— 读 `rule_fires`，不读 `interventions`
 
 ```rust
-fn is_ready(rule_id: &str, now_ms: i64, cooldown_ms: i64, conn: &Connection) -> bool {
-    let last_shown: Option<i64> = conn.query_row(
-        "SELECT MAX(shown_at) FROM interventions WHERE rule_id = ?",
+fn is_cooldown_ready(conn: &Connection, rule_id: &str, now_ms: i64, cooldown_ms: i64) -> bool {
+    let last: Option<i64> = conn.query_row(
+        "SELECT MAX(fired_at_ms) FROM rule_fires WHERE rule_id = ?",
         [rule_id], |r| r.get(0)
     ).ok().flatten();
-    last_shown.map_or(true, |t| now_ms - t > cooldown_ms)
+    last.map_or(true, |t| now_ms - t > cooldown_ms)
 }
 ```
+
+> ⚠️ **这是一个曾经出过事的地方。** 冷却必须看"这条规则**响应过**"（`rule_fires`，命中当拍就写），
+> 而不是"通知**弹出**过"（`interventions`）。二者不同：`Deferred` / `Debounce` 策略在命中时只入队、
+> 并不立刻弹通知，若冷却按 `interventions.shown_at` 判断，则冷却永远 ready，采集器每 5–15s
+> 就重新入队一条——一条 10 分钟延迟的规则会攒出几十条通知同时炸出来。
+> `Suppress` 也要记痕（否则每拍重算同一条规则）。`Debounce` 的窗口另看
+> `rule_fires.dedup_key`（`window_ms` 必须真的参与判断）。
+
+## 命中优先级
+
+`RuleEngine::evaluate` **跑完全部规则**，再按 `severity` 取最高，同级时**动态规则优先于内置规则**。
+不要改回"第一个命中即返回"——那样内置的通用娱乐规则会永远抢在用户精心建的规则前面，用户规则永不触发。
+
+## 近端结果（proximal outcome）
+
+`Immediate` 干预落库后立即入队两条 `observe_outcome`（+10min / +30min）。到点由 app ticker 计算窗口内
+娱乐时长占比，回填 `interventions.outcome`：
+
+| 占比 | outcome |
+|---|---|
+| ≥60% | `still_entertainment` |
+| ≤20% | `switched` |
+| 其间 | `mixed` |
+| 窗口内无前台观测 | `unknown`（不编）|
+
+只回填一次（10 分钟那次先落，30 分钟不覆盖）。`intervention::outcome_stats` 给出"转移率"。
+**这是本模块唯一的学习信号**：没有它，阈值只能靠感觉调，Phase 2.1 的 contextual bandit 也没有 label 可学。
 
 ---
 

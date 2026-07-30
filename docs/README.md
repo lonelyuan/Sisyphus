@@ -28,7 +28,8 @@
 | [spec/rule-engine.md](spec/rule-engine.md) | 规则引擎接口与 MVP 规则 |
 | [spec/android-collection.md](spec/android-collection.md) | Android Kotlin 插件 API 与权限 |
 | [spec/agent.md](spec/agent.md) | 反思平面：MCP 工具面与 Agent 边界 |
-| [spec/notion-integration.md](spec/notion-integration.md) | LifeIndex：Notion 用户独占编辑、只读同步与多源上下文 |
+| [spec/notion-integration.md](spec/notion-integration.md) | LifeIndex：LifeDB 事实源、Notion 文本投影与三方语义合并 |
+| [spec/lifeindex-mind-system.md](spec/lifeindex-mind-system.md) | **心智系统**：技能树与无极时间线的底座、不变量与理论依据 |
 | [spec/proactive-triggers.md](spec/proactive-triggers.md) | 调度器、主动推荐和宠物 / 通知投递 |
 
 ## 路线图

@@ -7,8 +7,6 @@
 //! 对应 Kotlin：`object com.sisyphus.collector.NativeBridge`（见 NativeBridge.kt）。
 //! JNI 命名 `Java_<pkg>_<Class>_<method>`；Kotlin object 的方法为实例方法 → 第二参数是 `JObject`。
 
-use std::time::Duration;
-
 use jni::objects::{JObject, JString};
 use jni::sys::{jlong, jstring};
 use jni::JNIEnv;
@@ -23,9 +21,7 @@ const USER_ID: &str = "local-user";
 const DEVICE_ID: &str = "android-usage";
 
 fn open_conn(path: &str) -> Option<Connection> {
-    let conn = db::open(path).ok()?;
-    let _ = conn.busy_timeout(Duration::from_secs(5));
-    Some(conn)
+    db::open(path).ok()
 }
 
 fn jstr(env: &mut JNIEnv, s: &JString) -> Option<String> {
@@ -58,7 +54,7 @@ pub extern "system" fn Java_com_sisyphus_collector_NativeBridge_evaluate<'local>
         let conn = open_conn(&db_path)?;
 
         let now = chrono::Utc::now().timestamp_millis();
-        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let today = sisyphus_core::clock::today_str(&conn);
         let goal = db::get_today_goal(&conn, &today).ok()?;
         // 权威分类：用户表 + 内置白名单（App 里加的 app 立即生效）；Kotlin 传的作后备。
         let category = sisyphus_core::category::categorize(&conn, &pkg)
@@ -166,7 +162,7 @@ pub extern "system" fn Java_com_sisyphus_collector_NativeBridge_debugState<'loca
         let db_path = jstr(&mut env, &db_path)?;
         let exists = std::path::Path::new(&db_path).exists();
         let conn = open_conn(&db_path)?;
-        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let today = sisyphus_core::clock::today_str(&conn);
         let goal = db::get_today_goal(&conn, &today).ok().flatten();
         let fg: i64 = conn
             .query_row(

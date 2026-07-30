@@ -74,20 +74,21 @@ fn accept_task_promotes_and_links_back() {
 
     let task_id = artifacts::accept_intent(&conn, &intent_id, None).unwrap();
 
-    let open = artifacts::list_open_tasks(&conn).unwrap();
-    let t = open.iter().find(|t| t.id == task_id).expect("task 应已创建");
+    // task 意图落成 LifeDB 的 action（LifeDB 是人生规划域唯一事实源，不再写 tasks 表）。
+    let open = context::list_open_items(&conn).unwrap();
+    let t = open.iter().find(|i| i.id == task_id).expect("action 应已创建");
     assert_eq!(t.title, "写周报");
-    assert_eq!(t.status, "todo");
-    assert_eq!(t.priority, 1);
+    assert_eq!(t.kind, "action");
+    assert_eq!(t.status, "inbox");
 
     // 候选转 accepted
     let accepted = artifacts::list_intent_candidates(&conn, Some("accepted")).unwrap();
     assert!(accepted.iter().any(|c| c.id == intent_id));
 
-    // 溯源链：task.intent_id / source_event_id 回填
+    // 溯源链：life_items.intent_id / source_event_id 回填
     let (linked_intent, linked_src): (String, String) = conn
         .query_row(
-            "SELECT intent_id, source_event_id FROM tasks WHERE id = ?1",
+            "SELECT intent_id, source_event_id FROM life_items WHERE id = ?1",
             [&task_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -117,10 +118,9 @@ fn accept_with_edits_marks_edited() {
     )
     .unwrap();
 
-    let open = artifacts::list_open_tasks(&conn).unwrap();
-    let t = open.iter().find(|t| t.id == task_id).unwrap();
+    let open = context::list_open_items(&conn).unwrap();
+    let t = open.iter().find(|i| i.id == task_id).unwrap();
     assert_eq!(t.title, "每天练吉他 15 分钟");
-    assert_eq!(t.priority, 2);
 
     let status: String = conn
         .query_row(
@@ -296,7 +296,13 @@ fn context_surfaces_open_tasks_and_due_reminders() {
     let ctx = context::today_context(&conn, "local-user").unwrap();
     assert_eq!(ctx.due_reminders.len(), 1, "只有 1 个已到期提醒");
     assert_eq!(ctx.due_reminders[0].text, "喝水");
-    assert!(ctx.open_tasks.iter().any(|t| t.title == "写测试"));
+    // task 意图现在落成 LifeDB 的 action（LifeDB 是人生规划域唯一事实源）。
+    assert!(
+        ctx.open_items
+            .iter()
+            .any(|i| i.title == "写测试" && i.kind == "action"),
+        "task 候选应落成 life_items 的 action 并出现在未完成事项里"
+    );
 
     let actions = context::today_actions(&conn).unwrap();
     assert!(actions.iter().any(|a| a == "写测试"), "today_actions 应合并未完成任务");

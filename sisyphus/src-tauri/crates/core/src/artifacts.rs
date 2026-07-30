@@ -69,7 +69,12 @@ pub struct Reminder {
 }
 
 /// 合法意图种类。
-pub const KINDS: &[&str] = &["goal", "task", "reminder", "note"];
+///
+/// `life_item` 与 `rule` 是补进来的：SKILL.md 早已把"长期目标/项目"和"帮我盯着 X"
+/// 列成路由目标，但它们此前绕过候选桥直接写库——于是这两类（恰恰是副作用最大的两类：
+/// 建规则会产生通知、写看板会同步到 Notion）**没有来源、没有置信度、无法回滚**，
+/// 与 Phase 1.0 的"所有 AI 推断都可回滚"验收标准相违。
+pub const KINDS: &[&str] = &["goal", "task", "reminder", "note", "life_item", "rule"];
 
 // ── Capture inbox ───────────────────────────────────────────────────────────
 
@@ -253,20 +258,70 @@ pub fn accept_intent(
                 .ok_or_else(|| "goal 候选缺少 text/title".to_string())?;
             crate::context::set_goal(&tx, &text).map_err(|e| e.to_string())?
         }
-        "task" => {
+        // task 落成 LifeDB 的 action：LifeDB 是人生规划域的唯一事实源。
+        // 此前 task 写 `tasks` 表、看板读 `life_items`，两边各说一套——助手记下的待办
+        // 要等 App 重启才出现在看板，而在看板里做完一件事，第二天早上仍会被提醒做它。
+        "task" | "life_item" => {
             let title = f_str(&payload, "title")
                 .or_else(|| f_str(&payload, "text"))
-                .ok_or_else(|| "task 候选缺少 title".to_string())?;
-            create_task(
+                .ok_or_else(|| format!("{kind} 候选缺少 title"))?;
+            let item_kind = if kind == "task" {
+                "action".to_string()
+            } else {
+                f_str(&payload, "kind").unwrap_or_else(|| "idea".to_string())
+            };
+            let due = f_i64(&payload, "due_ms").or_else(|| f_i64(&payload, "due_at_ms"));
+            let input = crate::lifedb::LifeItemInput {
+                kind: item_kind,
+                title,
+                body: f_str(&payload, "note")
+                    .or_else(|| f_str(&payload, "body"))
+                    .unwrap_or_default(),
+                track: f_str(&payload, "track").unwrap_or_else(|| "undecided".into()),
+                horizon: f_str(&payload, "horizon").unwrap_or_else(|| {
+                    if due.is_some() {
+                        "next".into()
+                    } else {
+                        "unscheduled".into()
+                    }
+                }),
+                status: f_str(&payload, "status").unwrap_or_else(|| "inbox".into()),
+                area_id: f_str(&payload, "area_id"),
+                success_criteria: f_str(&payload, "success_criteria"),
+                target_value: payload.get("target_value").and_then(|v| v.as_f64()),
+                current_value: payload.get("current_value").and_then(|v| v.as_f64()),
+                unit: f_str(&payload, "unit"),
+                due_at_ms: due,
+                start_at_ms: f_i64(&payload, "start_at_ms"),
+                review_at_ms: f_i64(&payload, "review_at_ms"),
+                recurrence: f_str(&payload, "recurrence"),
+                source_event_id: Some(capture_event_id.clone()),
+                intent_id: Some(intent_id.to_string()),
+                origin: "agent".to_string(),
+                ..Default::default()
+            };
+            crate::lifedb::upsert_item(&tx, input)?
+        }
+        // 检测规则也走候选桥：origin_capture_id 留下"哪句话催生了这条规则"。
+        "rule" => {
+            let name = f_str(&payload, "name")
+                .or_else(|| f_str(&payload, "title"))
+                .ok_or_else(|| "rule 候选缺少 name".to_string())?;
+            let trigger = payload
+                .get("trigger")
+                .ok_or_else(|| "rule 候选缺少 trigger".to_string())?
+                .to_string();
+            let response = payload.get("response").map(|v| v.to_string());
+            crate::rules::create_rule(
                 &tx,
-                &title,
-                f_i64(&payload, "due_ms"),
-                f_i64(&payload, "priority").unwrap_or(0),
-                f_str(&payload, "note").as_deref(),
+                &name,
+                &trigger,
+                response.as_deref(),
+                &f_str(&payload, "severity").unwrap_or_else(|| "medium".into()),
+                f_i64(&payload, "cooldown_minutes").unwrap_or(30),
+                "agent",
                 Some(&capture_event_id),
-                Some(intent_id),
-            )
-            .map_err(|e| e.to_string())?
+            )?
         }
         "reminder" => {
             let text = f_str(&payload, "text")

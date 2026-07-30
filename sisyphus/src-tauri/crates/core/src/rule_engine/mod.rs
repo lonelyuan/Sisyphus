@@ -119,24 +119,33 @@ impl RuleEngine {
         }
     }
 
-    /// 评估所有规则，返回第一个命中的 Finding（每次最多触发一条）。
-    /// 先跑内置规则，再跑数据库里用户/智能体建的动态规则（`detection_rules`，每次热加载）。
+    /// 评估所有规则，返回**最该处理的那一条** Finding（每拍最多干预一次）。
+    ///
+    /// 顺序不是"谁先注册谁赢"：先跑用户/智能体建的动态规则，再跑内置规则，然后按
+    /// severity 取最高（同级时动态规则优先）。此前是"第一个命中即返回、内置永远排在前面"，
+    /// 于是用户精心建的「夜间游戏 20 分钟」会被内置的通用娱乐规则抢先，永远不触发。
     pub fn evaluate(
         &self,
         ctx: &RuleContext,
         conn: &Connection,
     ) -> rusqlite::Result<Option<Finding>> {
-        for rule in &self.rules {
-            if let Some(finding) = rule.evaluate(ctx, conn)? {
-                return Ok(Some(finding));
-            }
-        }
+        let mut hits: Vec<Finding> = Vec::new();
         for rule in crate::rules::load_enabled_rules(conn)? {
             if let Some(finding) = rule.evaluate(ctx, conn)? {
-                return Ok(Some(finding));
+                hits.push(finding);
             }
         }
-        Ok(None)
+        for rule in &self.rules {
+            if let Some(finding) = rule.evaluate(ctx, conn)? {
+                hits.push(finding);
+            }
+        }
+        // stable sort：同 severity 时保持"动态规则在前"的次序。
+        hits.sort_by_key(|f| match f.severity.as_str() {
+            "high" => 0,
+            _ => 1,
+        });
+        Ok(hits.into_iter().next())
     }
 }
 

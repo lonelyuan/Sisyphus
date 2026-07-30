@@ -42,7 +42,7 @@ cd sisyphus/src-tauri && cargo build --release -p sisyphus-mcp
 |---|---|
 | [docs/spec/architecture.md](docs/spec/architecture.md) | **架构总纲**:两平面、双存储、`ingest_event`、MCP 工具面、目录映射 |
 | [docs/roadmap.md](docs/roadmap.md) | 阶段路线与近期下一步（A/B 双轨） |
-| [docs/spec/](docs/spec/) | 各专项规格：protocol / local-storage / rule-engine / agent / notion-integration / proactive-triggers / sync / android-collection |
+| [docs/spec/](docs/spec/) | 各专项规格：protocol / local-storage / rule-engine / agent / notion-integration / **lifeindex-mind-system**（技能树·无极时间线）/ proactive-triggers / sync / android-collection |
 | [docs/background.md](docs/background.md) | 项目缘起 |
 
 ## 前置工具链

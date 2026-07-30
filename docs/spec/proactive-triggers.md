@@ -107,7 +107,8 @@ enum DueTime { At(i64), After(i64) }   // 绝对 epoch ms / 相对延迟 ms
 |---|---|---|---|
 | `notify` | `tauri-plugin-notification` / 安卓 InterventionNotification | 桌面+安卓 | ✅ |
 | `pet_message` | emit `pet-message` 事件给宠物窗展示（`Pet.tsx` 监听）；与 `agent-recommendation` 共用展示逻辑 | 桌面 | ✅ 已接（去重待做） |
-| `agent_run` | worker 线程 `std::process::Command` 拉起 Pi/Codex；按 payload mode（proactive/lifeindex）读本地 MCP 与只读外部源，返回结构化结果再投递 | **仅桌面**（手机无 node/codex） | ✅ 已接 |
+| `agent_run` | worker 线程 `std::process::Command` 拉起 Pi/Codex；按 payload mode（proactive / lifeindex_sync / weekly_review）读本地 MCP 与只读外部源，返回结构化结果再投递 | **仅桌面**（手机无 node/codex） | ✅ 已接 |
+| `observe_outcome` | 干预后 10/30 分钟回看窗口内娱乐占比，回填 `interventions.outcome`。**纯数据，不打扰用户** | 桌面+安卓 | ✅ |
 
 **推荐 agent_run 的往返**：app 到点 → 读取本地 `query_context` 与 LifeDB → 拉 Agent 推理 → 返回一条 recommendation 或 `no_recommendation` → app 做冷却 / 去重 / 隐私校验 → 宠物与通知消费同一结果。**“何时触发”确定性在 app，“推荐什么”在 agent，“是否最终打扰”由宿主策略兜底**。
 
@@ -156,8 +157,10 @@ Notion 只参与输入，不参与输出。用户在 Notion 中的后续修改�
 1. `core::scheduler`：`scheduled_actions` 表 + `enqueue_action` / `due_actions` / `mark_fired` / `mark_done` / 周期 `reschedule` + 单测。
 2. app 常驻 ticker：`due-check` 派发 `notify` / `pet_message`（emit 到宠物窗，`Pet.tsx` 监听）/ `agent_run`（放 worker 线程执行，不阻塞主循环；缺 runtime 优雅降级）。
 3. `ResponsePolicy` seam 已立（`core::rule_engine::ResponsePolicy`：Immediate/Deferred/Debounce/Suppress）：规则命中经它落地——Immediate 即时派发、Deferred/Debounce 入队。
-4. 静态周期 job：每日 9:00 `proactive_recommendation`、每日 8:30 `lifeindex_sync`；LifeDB 本地修改另入队即时同步。旧 `lifeindex_refresh` pending job 启动时取消。
-5. `agent_run` 模式区分：`Proactive`（严格只读）/ `LifeIndexSync`（只写 LifeDB + 固定 Notion 页）/ `Interactive`（用户确认后可写 Core，Notion 只读）。
+4. 静态周期 job：每日 9:00 `proactive_recommendation`、每日 8:30 `lifeindex_sync`、每日 20:10 `weekly_review`（**只在周日发问**，其余天静默）；LifeDB 本地修改另入队即时同步。旧 `lifeindex_refresh` / `daily-kb-introspect` pending job 启动时取消。
+5. `observe_outcome` 执行器：干预后的近端结果观察（1.1 的学习信号）。
+6. ticker 每拍顺带追平无极时间线的预聚合桶（`rollups::catch_up`，无新事件只花一次索引查询）。
+7. `agent_run` 模式区分：`Proactive`（严格只读，含 weekly_review）/ `LifeIndexSync`（只写 LifeDB + 固定 Notion 页）/ `Interactive`（用户确认后可写 Core，Notion 只读）。
 
 **后续（按需，勿提前造）：**
 - 响应规划器接更多规则策略（真实 `Deferred`/`Debounce`/`Suppress` 防打扰场景批量落地）。

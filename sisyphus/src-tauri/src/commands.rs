@@ -65,7 +65,7 @@ pub fn evaluate_rules(
 ) -> Result<Option<FindingOutput>, String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
     let now_ms = Utc::now().timestamp_millis();
-    let today = Utc::now().format("%Y-%m-%d").to_string();
+    let today = sisyphus_core::clock::today_str(&conn);
 
     let goal = db::get_today_goal(&conn, &today).map_err(|e| e.to_string())?;
 
@@ -151,8 +151,11 @@ pub fn create_task(
     note: Option<String>,
 ) -> Result<String, String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
-    sisyphus_core::artifacts::create_task(&conn, &title, due_ms, 0, note.as_deref(), None, None)
-        .map_err(|e| e.to_string())
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let id = sisyphus_core::artifacts::create_task(&tx, &title, due_ms, 0, note.as_deref(), None, None)
+        .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(id)
 }
 
 #[tauri::command]
@@ -162,13 +165,17 @@ pub fn set_task_status(
     status: String,
 ) -> Result<(), String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
-    sisyphus_core::artifacts::update_task_status(&conn, &id, &status).map_err(|e| e.to_string())
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    sisyphus_core::artifacts::update_task_status(&tx, &id, &status).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn delete_task(state: State<'_, AppState>, id: String) -> Result<(), String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
-    sisyphus_core::artifacts::delete_task(&conn, &id).map_err(|e| e.to_string())
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    sisyphus_core::artifacts::delete_task(&tx, &id).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -491,31 +498,15 @@ pub fn cancel_agent_run(run_id: String) -> bool {
 
 /// Pi JS SDK 连接配置：provider/API 格式 + 自定义 endpoint + key + 模型。
 /// 持久化在 app 数据目录，key 只在 Rust 与 SDK sidecar 之间传递。
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct LlmConfig {
-    /// pi-ai provider id；openai 默认使用 Responses API。
-    #[serde(default)]
-    pub format: String,
-    /// 自定义 API base URL（留空=用该 provider 默认）
-    #[serde(default)]
-    pub base_url: String,
-    /// 模型名（pi-ai provider 目录内的模型 id）
-    #[serde(default)]
-    pub model: String,
-    /// API key（仅后端保存，不随 get_llm_config 返回）
-    #[serde(default)]
-    pub api_key: String,
-}
+/// schema 定义在 `sisyphus_core::app_config`（与 agent_runtime 共用，避免两处失配）。
+pub use sisyphus_core::app_config::LlmConfig;
 
 fn llm_config_path(state: &AppState) -> PathBuf {
-    state.data_dir.join("llm_config.json")
+    state.data_dir.join(sisyphus_core::app_config::LLM_CONFIG_FILE)
 }
 
 fn read_llm_config(state: &AppState) -> LlmConfig {
-    std::fs::read_to_string(llm_config_path(state))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    sisyphus_core::app_config::read_llm_config(&state.data_dir)
 }
 
 /// 读 LLM 配置（**不含 key**，只回 has_key 标记）。供前端构建 provider。
@@ -573,25 +564,15 @@ pub fn set_llm_config(
 }
 
 /// Notion LifeIndex 集成。token 只交给隔离网关，网关把读写固定到 page_id。
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct NotionConfig {
-    #[serde(default)]
-    pub token: String,
-    #[serde(default)]
-    pub page_id: String,
-    #[serde(default)]
-    pub sync_enabled: bool,
-}
+/// schema 定义在 `sisyphus_core::app_config`（与 agent_runtime 共用，避免两处失配）。
+pub use sisyphus_core::app_config::NotionConfig;
 
 fn notion_config_path(state: &AppState) -> PathBuf {
-    state.data_dir.join("notion_config.json")
+    state.data_dir.join(sisyphus_core::app_config::NOTION_CONFIG_FILE)
 }
 
 fn read_notion_config(state: &AppState) -> NotionConfig {
-    std::fs::read_to_string(notion_config_path(state))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    sisyphus_core::app_config::read_notion_config(&state.data_dir)
 }
 
 /// 读 Notion 配置（**不含 token**）。
@@ -731,4 +712,145 @@ pub async fn run_knowledge_agent(
     })
     .await
     .map_err(|e| format!("任务 join 失败: {e}"))?
+}
+
+// ── 知识工程：体检 / 红链 / 重建索引（前端「知识」页与 rebalance 例程用）────────
+
+#[tauri::command]
+pub fn kb_doctor(state: State<AppState>) -> Result<sisyphus_core::kb_doctor::KbReport, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    sisyphus_core::kb_doctor::doctor(&conn, Some(&state.vault_dir))
+}
+
+#[tauri::command]
+pub fn kb_wanted(
+    state: State<AppState>,
+    min_refs: Option<i64>,
+) -> Result<Vec<sisyphus_core::kb_doctor::WantedNote>, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    sisyphus_core::kb_doctor::wanted(&conn, min_refs.unwrap_or(1).max(1) as usize)
+}
+
+#[tauri::command]
+pub fn refresh_mocs(
+    state: State<AppState>,
+) -> Result<sisyphus_core::knowledge::MocRefreshReport, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    sisyphus_core::knowledge::refresh_mocs(&conn, &state.vault_dir)
+}
+
+#[tauri::command]
+pub fn kb_reindex(
+    state: State<AppState>,
+) -> Result<sisyphus_core::knowledge::ReindexReport, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    sisyphus_core::knowledge::reindex_vault(&conn, &state.vault_dir)
+}
+
+// ── LifeDB 心智系统：技能树 / 下一步 / 周回顾 / 责任领域 ──────────────────────
+
+#[tauri::command]
+pub fn life_tree(
+    state: State<AppState>,
+    kinds: Option<Vec<String>>,
+    root_id: Option<String>,
+) -> Result<Vec<sisyphus_core::lifetree::TreeNode>, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    if let Some(root) = root_id.as_deref().filter(|r| !r.trim().is_empty()) {
+        return Ok(vec![sisyphus_core::lifetree::subtree(&conn, root)?]);
+    }
+    let kinds = kinds.unwrap_or_default();
+    let refs: Vec<&str> = kinds.iter().map(|k| k.as_str()).collect();
+    sisyphus_core::lifetree::forest(&conn, &refs)
+}
+
+#[tauri::command]
+pub fn next_actions(
+    state: State<AppState>,
+    limit: Option<i64>,
+) -> Result<Vec<sisyphus_core::lifetree::NextAction>, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    sisyphus_core::lifetree::next_actions(&conn, limit.unwrap_or(3).clamp(1, 10) as usize)
+}
+
+#[tauri::command]
+pub fn review_queue(
+    state: State<AppState>,
+    idle_days: Option<i64>,
+) -> Result<sisyphus_core::lifetree::ReviewQueue, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    sisyphus_core::lifetree::review_queue(&conn, idle_days.unwrap_or(7))
+}
+
+#[tauri::command]
+pub fn list_life_areas(
+    state: State<AppState>,
+) -> Result<Vec<sisyphus_core::lifedb::LifeArea>, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    sisyphus_core::lifedb::list_areas(&conn)
+}
+
+#[tauri::command]
+pub fn upsert_life_area(
+    state: State<AppState>,
+    name: String,
+    description: Option<String>,
+    focus: Option<bool>,
+) -> Result<String, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    sisyphus_core::lifedb::upsert_area(&conn, &name, description.as_deref(), focus)
+}
+
+// ── 干预效果 / 时间线基建 ────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn intervention_outcomes(
+    state: State<AppState>,
+    since_days: Option<i64>,
+) -> Result<sisyphus_core::intervention::OutcomeStats, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    let since = sisyphus_core::clock::now_ms() - since_days.unwrap_or(30).max(1) * 86_400_000;
+    sisyphus_core::intervention::outcome_stats(&conn, since).map_err(|e| e.to_string())
+}
+
+/// 整体重算预聚合桶（改了换日点后必须调；平时由 ticker 增量追平）。
+#[tauri::command]
+pub fn rebuild_rollups(state: State<AppState>, full: Option<bool>) -> Result<usize, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    if full.unwrap_or(false) {
+        sisyphus_core::rollups::invalidate_all(&conn).map_err(|e| e.to_string())?;
+    }
+    sisyphus_core::rollups::rebuild(&conn, full.unwrap_or(false)).map_err(|e| e.to_string())
+}
+
+/// 换日点（0–23）。改动会让已有桶口径失效，因此顺带整体重算。
+#[tauri::command]
+pub fn set_day_boundary_hour(state: State<AppState>, hour: i64) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    if !(0..=23).contains(&hour) {
+        return Err("换日点必须在 0–23 之间".to_string());
+    }
+    sisyphus_core::settings::set(&conn, "day_boundary_hour", &hour.to_string())
+        .map_err(|e| e.to_string())?;
+    sisyphus_core::rollups::invalidate_all(&conn).map_err(|e| e.to_string())?;
+    sisyphus_core::rollups::rebuild(&conn, true).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_day_boundary_hour(state: State<AppState>) -> Result<u32, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    Ok(sisyphus_core::clock::boundary_hour(&conn))
+}
+
+// ── Notion 回滚（整页替换的安全网）──────────────────────────────────────────
+
+#[tauri::command]
+pub fn list_lifeindex_runs(
+    state: State<AppState>,
+    limit: Option<i64>,
+) -> Result<Vec<sisyphus_core::lifedb::LifeSyncRun>, String> {
+    let target = sisyphus_core::app_config::read_notion_config(&state.data_dir).page_id;
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    sisyphus_core::lifedb::list_sync_runs(&conn, &target, limit.unwrap_or(10))
 }
