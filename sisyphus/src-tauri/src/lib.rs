@@ -392,6 +392,8 @@ pub fn run() {
             commands::kb_reindex,
             commands::refresh_mocs,
             commands::life_tree,
+            commands::skill_map,
+            commands::skill_tree_growth,
             commands::next_actions,
             commands::review_queue,
             commands::list_life_areas,

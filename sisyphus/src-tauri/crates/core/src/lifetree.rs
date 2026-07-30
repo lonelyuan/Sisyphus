@@ -34,7 +34,7 @@ pub struct TreeNode {
 }
 
 const HIERARCHY: &[&str] = &["contains", "supports"];
-const MAX_DEPTH: usize = 8;
+pub const MAX_DEPTH: usize = 8;
 
 fn is_closed(status: &str) -> bool {
     matches!(status, "done" | "archived")
@@ -196,8 +196,59 @@ pub fn forest(conn: &Connection, kinds: &[&str]) -> Result<Vec<TreeNode>, String
     Ok(out)
 }
 
-// ── 下一步选择（确定性 + 可解释）────────────────────────────────────────────
+/// 一个节点的确定性进度。
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct Progress {
+    pub progress: f64,
+    pub done_leaves: usize,
+    pub total_leaves: usize,
+}
 
+/// 全库进度索引：id → 进度。**与 [`forest`] 完全同源**（两者都走 [`Graph::node`]），
+/// 所以技能树、时间线的 `plans` 图层与时间播放不可能给出互相矛盾的数字。
+///
+/// 传入的 `items` / `edges` 可以是"某个历史时刻的样子"（由 `skillmap` 按进度账本覆盖过），
+/// 于是回放与"现在"共用同一套算法，而不是第二套估算。
+pub fn progress_index(
+    items: Vec<LifeItem>,
+    edges: Vec<(String, String, String)>,
+) -> std::collections::HashMap<String, Progress> {
+    fn collect(node: &TreeNode, out: &mut std::collections::HashMap<String, Progress>) {
+        out.insert(
+            node.item.id.clone(),
+            Progress {
+                progress: node.progress,
+                done_leaves: node.done_leaves,
+                total_leaves: node.total_leaves,
+            },
+        );
+        for child in &node.children {
+            collect(child, out);
+        }
+    }
+    let graph = Graph::build(items, edges);
+    let mut out = std::collections::HashMap::new();
+    for id in &graph.order {
+        if !graph.is_root(id) {
+            continue;
+        }
+        if let Some(node) = graph.node(id, 0, &mut Vec::new()) {
+            collect(&node, &mut out);
+        }
+    }
+    // 纯环（每个节点都有父）没有根，兜底单独算一遍——保证每个 item 都有数，不会静默缺项。
+    for id in &graph.order {
+        if out.contains_key(id) {
+            continue;
+        }
+        if let Some(node) = graph.node(id, 0, &mut Vec::new()) {
+            collect(&node, &mut out);
+        }
+    }
+    out
+}
+
+// ── 下一步选择（确定性 + 可解释）────────────────────────────────────────────
 #[derive(Debug, Clone, Serialize)]
 pub struct NextAction {
     pub item_id: String,

@@ -1,45 +1,23 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import {
-  Archive,
-  Check,
-  Clock3,
-  Flame,
-  LayoutGrid,
-  Plus,
-  RefreshCw,
-  Repeat2,
-  Route,
-  Sparkles,
-  X,
-} from "lucide-react";
+import { Check, Clock3, Flame, LayoutGrid, Plus, RefreshCw, Repeat2, Route, Sparkles } from "lucide-react";
 import { Card, CardLabel } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-
-type LifeKind = "idea" | "goal" | "project" | "action" | "routine";
-type LifeTrack = "main" | "side" | "neutral" | "undecided";
-type LifeHorizon = "now" | "next" | "later" | "someday" | "unscheduled";
-type LifeStatus = "inbox" | "active" | "waiting" | "done" | "archived";
-
-interface LifeItem {
-  id: string;
-  kind: LifeKind;
-  title: string;
-  body: string;
-  track: LifeTrack;
-  horizon: LifeHorizon;
-  status: LifeStatus;
-  start_at_ms: number | null;
-  due_at_ms: number | null;
-  review_at_ms: number | null;
-  recurrence: string | null;
-  sync_status: "clean" | "local_dirty" | "notion_dirty" | "conflict";
-  revision: number;
-  updated_at: number;
-}
+import ItemDraftDialog from "@/lifeindex/ItemDraftDialog";
+import {
+  dateValue,
+  emptyDraft,
+  kindLabel,
+  horizonLabel,
+  payload,
+  toDraft,
+  type Draft,
+  type LifeArea,
+  type LifeItem,
+  type LifeStatus,
+} from "@/lifeindex/model";
 
 interface SyncOverview {
   configured: boolean;
@@ -52,102 +30,6 @@ interface SyncOverview {
     last_attempt_at_ms: number | null;
     last_error: string | null;
   } | null;
-}
-
-interface Draft {
-  id?: string;
-  expected_revision?: number;
-  kind: LifeKind;
-  title: string;
-  body: string;
-  track: LifeTrack;
-  horizon: LifeHorizon;
-  status: LifeStatus;
-  start_date: string;
-  due_date: string;
-  review_date: string;
-  recurrence: string;
-}
-
-const kindLabel: Record<LifeKind, string> = {
-  idea: "想法",
-  goal: "目标",
-  project: "项目",
-  action: "事项",
-  routine: "日常",
-};
-const horizonLabel: Record<LifeHorizon, string> = {
-  now: "现在",
-  next: "近期",
-  later: "以后",
-  someday: "也许",
-  unscheduled: "未定",
-};
-const statusLabel: Record<LifeStatus, string> = {
-  inbox: "待整理",
-  active: "进行中",
-  waiting: "等待",
-  done: "完成",
-  archived: "已归档",
-};
-
-const emptyDraft: Draft = {
-  kind: "action",
-  title: "",
-  body: "",
-  track: "undecided",
-  horizon: "unscheduled",
-  status: "inbox",
-  start_date: "",
-  due_date: "",
-  review_date: "",
-  recurrence: "",
-};
-
-function dateValue(ms: number | null) {
-  return ms ? new Date(ms).toISOString().slice(0, 10) : "";
-}
-
-function dateMs(value: string) {
-  return value ? new Date(`${value}T12:00:00`).getTime() : null;
-}
-
-function toDraft(item: LifeItem): Draft {
-  return {
-    id: item.id,
-    expected_revision: item.revision,
-    kind: item.kind,
-    title: item.title,
-    body: item.body,
-    track: item.track,
-    horizon: item.horizon,
-    status: item.status,
-    start_date: dateValue(item.start_at_ms),
-    due_date: dateValue(item.due_at_ms),
-    review_date: dateValue(item.review_at_ms),
-    recurrence: item.recurrence ?? "",
-  };
-}
-
-function payload(draft: Draft) {
-  return {
-    id: draft.id ?? null,
-    expected_revision: draft.expected_revision ?? null,
-    kind: draft.kind,
-    title: draft.title,
-    body: draft.body,
-    track: draft.track,
-    horizon: draft.horizon,
-    status: draft.status,
-    start_at_ms: dateMs(draft.start_date),
-    due_at_ms: dateMs(draft.due_date),
-    review_at_ms: dateMs(draft.review_date),
-    recurrence: draft.recurrence.trim() || null,
-    source_event_id: null,
-    intent_id: null,
-    origin: "app",
-    external_ref: null,
-  };
 }
 
 function ItemCard({ item, onEdit, onToggle }: { item: LifeItem; onEdit: () => void; onToggle: () => void }) {
@@ -193,6 +75,7 @@ function ItemCard({ item, onEdit, onToggle }: { item: LifeItem; onEdit: () => vo
 
 export default function LifeIndexScreen() {
   const [items, setItems] = useState<LifeItem[]>([]);
+  const [areas, setAreas] = useState<LifeArea[]>([]);
   const [sync, setSync] = useState<SyncOverview | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -202,12 +85,14 @@ export default function LifeIndexScreen() {
 
   const load = useCallback(async () => {
     try {
-      const [nextItems, nextSync] = await Promise.all([
+      const [nextItems, nextSync, nextAreas] = await Promise.all([
         invoke<LifeItem[]>("list_life_items", { includeArchived: false }),
         invoke<SyncOverview>("get_lifeindex_sync_overview"),
+        invoke<LifeArea[]>("list_life_areas"),
       ]);
       setItems(nextItems);
       setSync(nextSync);
+      setAreas(nextAreas);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -315,7 +200,7 @@ export default function LifeIndexScreen() {
             <h2 className="text-sm font-medium text-foreground">LifeIndex</h2>
             <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">LifeDB · {items.length}</span>
           </div>
-          <p className="mt-1.5 text-[11px] text-muted-foreground">一份结构化数据，四个重叠视角。事项/日常描述形态，主线/支线描述意义。</p>
+          <p className="mt-1.5 text-[11px] text-muted-foreground">一份结构化数据，四个重叠视角。事项/日常描述形态，主线/支线描述意义。能力全景在「技能树」。</p>
         </div>
         <div className="flex items-center gap-2">
           <span className={cn("text-[10px]", sync?.state?.last_error ? "text-danger" : "text-muted-foreground")}>
@@ -368,43 +253,16 @@ export default function LifeIndexScreen() {
       )}
 
       {draft && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 p-3 backdrop-blur-sm sm:items-center" onMouseDown={(event) => event.target === event.currentTarget && setDraft(null)}>
-          <Card className="max-h-[92vh] w-full max-w-xl overflow-y-auto p-4 shadow-2xl">
-            <div className="mb-4 flex items-center justify-between">
-              <div><p className="text-sm font-medium text-foreground">{draft.id ? "编辑 LifeItem" : "新建 LifeItem"}</p><p className="mt-0.5 text-[10px] text-muted-foreground">修改保存后先写入 SQLite，再由 Agent 投影到 Notion。</p></div>
-              <Button variant="ghost" size="icon" onClick={() => setDraft(null)}><X size={16} /></Button>
-            </div>
-            <div className="flex flex-col gap-3">
-              <label className="text-[11px] text-muted-foreground">标题<Input className="mt-1" autoFocus value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && void save()} /></label>
-              <label className="text-[11px] text-muted-foreground">补充说明<textarea className="mt-1 min-h-20 w-full resize-y rounded-md border border-input bg-input px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-ring/40" value={draft.body} onChange={(e) => setDraft({ ...draft, body: e.target.value })} /></label>
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                <SelectField label="形态" value={draft.kind} onChange={(kind) => setDraft({ ...draft, kind: kind as LifeKind })} options={Object.entries(kindLabel)} />
-                <SelectField label="主次" value={draft.track} onChange={(track) => setDraft({ ...draft, track: track as LifeTrack })} options={[["undecided", "未判断"], ["main", "主线"], ["side", "支线"], ["neutral", "中性"]]} />
-                <SelectField label="时间尺度" value={draft.horizon} onChange={(horizon) => setDraft({ ...draft, horizon: horizon as LifeHorizon })} options={Object.entries(horizonLabel)} />
-                <SelectField label="状态" value={draft.status} onChange={(status) => setDraft({ ...draft, status: status as LifeStatus })} options={Object.entries(statusLabel).filter(([key]) => key !== "archived")} />
-              </div>
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-                <DateField label="开始" value={draft.start_date} onChange={(start_date) => setDraft({ ...draft, start_date })} />
-                <DateField label="截止" value={draft.due_date} onChange={(due_date) => setDraft({ ...draft, due_date })} />
-                <DateField label="复查" value={draft.review_date} onChange={(review_date) => setDraft({ ...draft, review_date })} />
-              </div>
-              <label className="text-[11px] text-muted-foreground">循环规则<Input className="mt-1" value={draft.recurrence} onChange={(e) => setDraft({ ...draft, recurrence: e.target.value })} placeholder="如：每天 / 每周三 / RRULE:FREQ=WEEKLY" /></label>
-            </div>
-            <div className="mt-5 flex items-center justify-between gap-2">
-              <div>{draft.id && <Button variant="ghost" size="sm" className="text-danger hover:text-danger" disabled={saving} onClick={() => void archive()}><Archive size={13} /> 归档</Button>}</div>
-              <div className="flex gap-2"><Button variant="secondary" size="sm" onClick={() => setDraft(null)}>取消</Button><Button size="sm" disabled={saving || !draft.title.trim()} onClick={() => void save()}>{saving ? "保存中…" : "保存"}</Button></div>
-            </div>
-          </Card>
-        </div>
+        <ItemDraftDialog
+          draft={draft}
+          areas={areas}
+          saving={saving}
+          onChange={setDraft}
+          onClose={() => setDraft(null)}
+          onSave={() => void save()}
+          onArchive={() => void archive()}
+        />
       )}
     </div>
   );
-}
-
-function SelectField({ label, value, options, onChange }: { label: string; value: string; options: string[][]; onChange: (value: string) => void }) {
-  return <label className="text-[11px] text-muted-foreground">{label}<select className="mt-1 h-9 w-full rounded-md border border-input bg-input px-2 text-xs text-foreground outline-none focus:ring-2 focus:ring-ring/40" value={value} onChange={(e) => onChange(e.target.value)}>{options.map(([key, text]) => <option key={key} value={key}>{text}</option>)}</select></label>;
-}
-
-function DateField({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
-  return <label className="text-[11px] text-muted-foreground">{label}<Input className="mt-1 text-xs" type="date" value={value} onChange={(e) => onChange(e.target.value)} /></label>;
 }

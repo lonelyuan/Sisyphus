@@ -688,6 +688,25 @@ CREATE TABLE IF NOT EXISTS life_item_external_refs (
 );
 CREATE INDEX IF NOT EXISTS idx_life_refs_item ON life_item_external_refs (item_id, provider);
 
+-- 进度账本：append-only，一行 = 一次真实的状态/度量变更后的完整快照。
+-- **为什么必须有**：life_items 只有会被覆盖的 updated_at，因此"这棵树是怎么长成现在这样的"
+-- 没有任何诚实的数据源。技能树的时间播放读这张表在时刻 T 之前的最后一行，再跑同一套
+-- lifetree 进度算法——回放与"现在"共用一个口径，不是第二套估算。
+-- 只在 status 或 current/target 实际变化时追加；每行都是全量三元组，NULL 就是"没有度量"。
+CREATE TABLE IF NOT EXISTS life_item_progress (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id       TEXT NOT NULL,
+    at_ms         INTEGER NOT NULL,
+    status        TEXT,
+    current_value REAL,
+    target_value  REAL,
+    revision      INTEGER NOT NULL DEFAULT 0,
+    origin        TEXT NOT NULL,               -- app|agent|notion|import|backfill
+    FOREIGN KEY (item_id) REFERENCES life_items(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_life_progress_item ON life_item_progress (item_id, at_ms);
+CREATE INDEX IF NOT EXISTS idx_life_progress_time ON life_item_progress (at_ms);
+
 -- 三方合并基线：上次成功投影文本 + 同步状态。Agent 负责理解差异，Core 负责审计与门禁。
 CREATE TABLE IF NOT EXISTS life_sync_state (
     provider           TEXT NOT NULL,

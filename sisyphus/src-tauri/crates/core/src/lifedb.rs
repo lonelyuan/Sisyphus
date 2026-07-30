@@ -229,13 +229,15 @@ pub fn upsert_item(conn: &Connection, mut input: LifeItemInput) -> Result<String
     normalize_and_validate(&mut input)?;
     let now = now_ms();
     let id = resolve_item_id(conn, &input)?.unwrap_or_else(|| Uuid::new_v4().to_string());
-    let exists: bool = conn
-        .query_row("SELECT 1 FROM life_items WHERE id=?1", params![id], |_| {
-            Ok(true)
-        })
+    let before: Option<(String, Option<f64>, Option<f64>)> = conn
+        .query_row(
+            "SELECT status,current_value,target_value FROM life_items WHERE id=?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
         .optional()
-        .map_err(|e| e.to_string())?
-        .unwrap_or(false);
+        .map_err(|e| e.to_string())?;
+    let exists = before.is_some();
     let sync_status = match input.origin.as_str() {
         "import" => "clean",
         "notion" => "notion_dirty",
@@ -321,6 +323,26 @@ pub fn upsert_item(conn: &Connection, mut input: LifeItemInput) -> Result<String
     if let Some(ext) = input.external_ref {
         upsert_external_ref(conn, &id, &ext)?;
     }
+    // 进度账本：只在 status 或度量真的变了才追加一行（新建视为从无到有，必记）。
+    let changed_progress = match &before {
+        None => true,
+        Some((status, current, target)) => {
+            *status != input.status
+                || !same_metric(*current, input.current_value)
+                || !same_metric(*target, input.target_value)
+        }
+    };
+    if changed_progress {
+        record_progress(
+            conn,
+            &id,
+            now,
+            &input.status,
+            input.current_value,
+            input.target_value,
+            &input.origin,
+        )?;
+    }
     if !matches!(input.origin.as_str(), "notion" | "import") {
         request_sync(conn)?;
     }
@@ -388,10 +410,102 @@ pub fn archive_item(
     if changed == 0 {
         return Err(format!("LifeItem 不存在或 revision 已变化: {id}"));
     }
+    let metric: Option<(Option<f64>, Option<f64>)> = conn
+        .query_row(
+            "SELECT current_value,target_value FROM life_items WHERE id=?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let (current, target) = metric.unwrap_or((None, None));
+    record_progress(conn, id, now, "archived", current, target, origin)?;
     if origin != "notion" {
         request_sync(conn)?;
     }
     Ok(())
+}
+
+/// 两个度量值是否等价（`None` 与 `None` 等价；浮点按 1e-9 比）。
+fn same_metric(a: Option<f64>, b: Option<f64>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => (x - y).abs() < 1e-9,
+        _ => false,
+    }
+}
+
+/// 追加一行进度账本。**每行是变更后的全量三元组**，所以时间播放只需取 `at_ms <= T` 的最后一行。
+pub fn record_progress(
+    conn: &Connection,
+    item_id: &str,
+    at_ms: i64,
+    status: &str,
+    current_value: Option<f64>,
+    target_value: Option<f64>,
+    origin: &str,
+) -> Result<(), String> {
+    let revision: i64 = conn
+        .query_row(
+            "SELECT revision FROM life_items WHERE id=?1",
+            params![item_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .unwrap_or(0);
+    conn.execute(
+        "INSERT INTO life_item_progress
+           (item_id,at_ms,status,current_value,target_value,revision,origin)
+         VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        params![
+            item_id,
+            at_ms,
+            status,
+            current_value,
+            target_value,
+            revision,
+            origin
+        ],
+    )
+    .map_err(|e| format!("写入进度账本失败: {e}"))?;
+    Ok(())
+}
+
+/// 账本里的一次变更（全量快照）。
+#[derive(Debug, Clone, Serialize)]
+pub struct ProgressPoint {
+    pub item_id: String,
+    pub at_ms: i64,
+    pub status: String,
+    pub current_value: Option<f64>,
+    pub target_value: Option<f64>,
+}
+
+/// 按时间升序列出账本。`until_ms=Some(T)` 只取 `at_ms <= T`（时间播放用）。
+pub fn list_progress(conn: &Connection, until_ms: Option<i64>) -> Result<Vec<ProgressPoint>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT item_id,at_ms,status,current_value,target_value
+             FROM life_item_progress
+             WHERE (?1 IS NULL OR at_ms <= ?1)
+             ORDER BY at_ms ASC, id ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![until_ms], |r| {
+            Ok(ProgressPoint {
+                item_id: r.get(0)?,
+                at_ms: r.get(1)?,
+                status: r.get(2)?,
+                current_value: r.get(3)?,
+                target_value: r.get(4)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
 }
 
 pub fn link_items(
@@ -1078,5 +1192,74 @@ mod tests {
         let current = list_items(&conn, false).unwrap().remove(0);
         assert_eq!(current.title, "写完方案");
         assert_eq!(current.sync_status, "local_dirty");
+    }
+
+    #[test]
+    fn progress_ledger_only_grows_on_real_changes() {
+        let conn = conn();
+        let count = |conn: &Connection| -> i64 {
+            conn.query_row("SELECT COUNT(*) FROM life_item_progress", [], |r| r.get(0))
+                .unwrap()
+        };
+        let id = upsert_item(
+            &conn,
+            LifeItemInput {
+                kind: "milestone".into(),
+                title: "雅思 7 分".into(),
+                origin: "app".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(count(&conn), 1, "新建必须留下起点");
+
+        // 只改标题：进度没变，账本不该增长。
+        let before = list_items(&conn, false).unwrap().remove(0);
+        upsert_item(
+            &conn,
+            LifeItemInput {
+                id: Some(id.clone()),
+                expected_revision: Some(before.revision),
+                kind: before.kind.clone(),
+                title: "雅思 7.0".into(),
+                status: before.status.clone(),
+                origin: "app".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(count(&conn), 1, "标题变更不是进展");
+
+        // 度量推进：必须记一行，且是变更后的全量快照。
+        let before = list_items(&conn, false).unwrap().remove(0);
+        upsert_item(
+            &conn,
+            LifeItemInput {
+                id: Some(id.clone()),
+                expected_revision: Some(before.revision),
+                kind: before.kind,
+                title: before.title,
+                status: before.status,
+                target_value: Some(7.0),
+                current_value: Some(5.25),
+                origin: "app".into(),
+            ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(count(&conn), 2);
+        let last = list_progress(&conn, None).unwrap().pop().unwrap();
+        assert_eq!(last.current_value, Some(5.25));
+        assert_eq!(last.target_value, Some(7.0));
+
+        // 归档也是一次状态变更。
+        let before = list_items(&conn, false).unwrap().remove(0);
+        archive_item(&conn, &id, "app", Some(before.revision)).unwrap();
+        let points = list_progress(&conn, None).unwrap();
+        assert_eq!(points.len(), 3);
+        assert_eq!(points.last().unwrap().status, "archived");
+        // until_ms 截断：归档发生之前的时刻看不到归档。
+        let earlier = list_progress(&conn, Some(points[2].at_ms - 1)).unwrap();
+        assert!(earlier.iter().all(|p| p.status != "archived"));
     }
 }
